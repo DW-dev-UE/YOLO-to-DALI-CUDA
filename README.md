@@ -43,6 +43,12 @@ Please add your benchmark table here (this section is very important for this ty
 
 ## 💡 Quick Start
 
+> INSTALL <br>
+
+```bash
+git clone https://github.com/DW-dev-UE/YOLO-to-DALI-CUDA.git
+```
+
 ---
 
 ## 📜 License & Compliance
