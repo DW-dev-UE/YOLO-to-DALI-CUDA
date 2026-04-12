@@ -2,7 +2,7 @@
 YOLO-DALI – NVIDIA DALI accelerated data loading for Ultralytics YOLO
 
 # Project Overview
-This is a GitHub open-source project developed to assist users who train YOLO models on images.
+This is a GitHub open-source project developed to assist users who train YOLO models on images. <br> 
 The current YOLO implementation does not utilize NVIDIA’s CUDA DALI library, so image preprocessing is performed on the CPU. This library was created to help users reduce CPU load.
 
 # 🔊 This project clearly states the following:
