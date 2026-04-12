@@ -1,0 +1,61 @@
+[build-system]
+	requires = ["setuptools>=70.0.0,<=82.0.1", "wheel"]
+	build-backend = "setuptools.build_meta"
+
+[project]
+	name = "ultralytics-dali-cuda"
+	dynamic = ["version"]
+	description = "Ultralytics YOLO with NVIDIA DALI GPU image decode support (fork for reduced CPU load)"
+	readme = "README.md"
+	requires-python = ">=3.8"
+	license = {text = "AGPL-3.0"}
+	keywords = ["YOLO", "DALI", "CUDA", "GPU", "deep-learning", "computer-vision", "object-detection"]
+	authors = [
+		{name = "DW-dev-UE"}
+	]
+	classifiers = [
+		"Programming Language :: Python :: 3",
+		"License :: OSI Approved :: GNU Affero General Public License v3",
+		"Operating System :: OS Independent",
+		"Topic :: Scientific/Engineering :: Artificial Intelligence"
+	]
+
+dependencies = [
+	"numpy>=1.23.0",
+	"matplotlib>=3.3.0",
+	"opencv-python>=4.6.0",
+	"pillow>=7.1.2",
+	"pyyaml>=5.3.1",
+	"requests>=2.23.0",
+	"scipy>=1.4.1",
+	"torch>=1.8.0",
+	"torchvision>=0.9.0",
+	"tqdm>=4.64.0",
+	"psutil",
+	"py-cpuinfo",
+	"pandas>=1.1.4",
+	"seaborn>=0.11.0",
+	"ultralytics-thop>=2.0.0"
+]
+
+[project.optional-dependencies]
+	dali-cu12 = ["nvidia-dali-cuda120"]
+	dali-cu11 = ["nvidia-dali-cuda110"]
+
+[project.urls]
+	"Homepage" = "https://github.com/DW-dev-UE/YOLO-to-DALI-CUDA"
+	"Source" = "https://github.com/DW-dev-UE/YOLO-to-DALI-CUDA"
+	"Bug Reports" = "https://github.com/DW-dev-UE/YOLO-to-DALI-CUDA/issues"
+
+[project.scripts]
+	yolo = "ultralytics.cfg:entrypoint"
+
+[tool.setuptools]
+	packages = {find = {where = ["."], include = ["ultralytics", "ultralytics.*"]}}
+
+[tool.setuptools.package-data]
+	"ultralytics" = ["**/*.yaml", "**/*.sh"]
+	"ultralytics.assets" = ["*.jpg"]
+
+[tool.setuptools.dynamic]
+	version = {attr = "ultralytics.__version__"}
