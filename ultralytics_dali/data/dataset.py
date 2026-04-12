@@ -123,10 +123,11 @@ class YOLODataset(BaseDataset):
 			(out,) = self.dali_pipe.run()
 			im = np.array(out[0].as_cpu())
 			if self.channels == 1 and im.ndim == 3:
-				im = im[:, :, 0]  # (H,W,1) -> (H,W) to match cv2 grayscale
+				im = im[:, :, 0]
 			return im
 		except Exception as e:
 			LOGGER.warning(f"{self.prefix}DALI decode error {f}: {e}")
+			self.dali_pipe = None
 			return None
 
 	def cache_labels(self, path: Path = Path("./labels.cache")) -> dict:
