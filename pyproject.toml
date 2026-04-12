@@ -4,7 +4,7 @@
 
 [project]
 	name = "ultralytics-dali-cuda"
-	dynamic = ["version"]
+	version = "0.1.0"
 	description = "Ultralytics YOLO with NVIDIA DALI GPU image decode support (fork for reduced CPU load)"
 	readme = "README.md"
 	requires-python = ">=3.8"
@@ -56,6 +56,3 @@ dependencies = [
 [tool.setuptools.package-data]
 	"ultralytics_dali" = ["**/*.yaml", "**/*.sh"]
 	"ultralytics_dali.assets" = ["*.jpg"]
-
-[tool.setuptools.dynamic]
-	version = {attr = "ultralytics_dali.__version__"}
