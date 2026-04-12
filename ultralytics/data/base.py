@@ -187,29 +187,17 @@ class BaseDataset(Dataset):
 				self.labels[i]["cls"][:, 0] = 0
 
 	def load_image(self, i: int, rect_mode: bool = True) -> tuple[np.ndarray, tuple[int, int], tuple[int, int]]:
-		"""Load an image from the dataset.
-
-		Args:
-			i (int): Index of the image to load.
-			rect_mode (bool): If True, resize to fit within imgsz maintaining aspect ratio.
-
-		Returns:
-			(tuple): Tuple of (image, original_hw, resized_hw).
-		"""
+		"""Load an image from the dataset."""
 		im, f, fn = self.ims[i], self.im_files[i], self.npy_files[i]
-
 		if im is None:  # not cached in RAM
-			# 1) npy cache hit
-			if fn.exists():
+			if fn.exists():  # npy cache
 				try:
 					im = np.load(fn)
 				except Exception as e:
 					LOGGER.warning(f"{self.prefix}Removing corrupt *.npy image file {fn} due to: {e}")
 					Path(fn).unlink(missing_ok=True)
 					im = None
-
-			# 2) npy miss or corrupt -> decode
-			if im is None:
+			if im is None:  # npy miss or corrupt
 				im = self._decode_image(f)
 
 			if im is None:
@@ -238,11 +226,9 @@ class BaseDataset(Dataset):
 
 		return self.ims[i], self.im_hw0[i], self.im_hw[i]
 
-	def _decode_image(self, filepath: str) -> np.ndarray:
-		"""Decode a single image file.
-		DALI가 활성화된 서브클래스에서 override됨.
-		기본 동작은 cv2 imread."""
-		return imread(filepath, flags=self.cv2_flag)
+	def _decode_image(self, f: str) -> np.ndarray:
+		"""Decode image from file. Subclasses can override for custom decode (e.g. DALI)."""
+		return imread(f, flags=self.cv2_flag)
 
 	def cache_images(self) -> None:
 		"""Cache images to memory or disk for faster training."""
