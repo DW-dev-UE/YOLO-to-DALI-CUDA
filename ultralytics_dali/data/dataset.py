@@ -79,12 +79,17 @@ class YOLODataset(BaseDataset):
 		>>> dataset.get_labels()
 	"""
 
-	def __init__(self, *args, use_dali: bool = False, **kwargs):
+	def __init__(self, *args, data=None, task="detect", use_dali: bool = False, **kwargs):
+		self.use_segments = task != "obb" and task == "segment"
+		self.use_keypoints = task == "pose"
+		self.use_obb = task == "obb"
+		self.data = data
+		assert data, "data argument is required"
 		self.use_dali = use_dali and DALI_AVAILABLE
 		self.dali_pipe = None
 		if use_dali and not DALI_AVAILABLE:
 			LOGGER.warning("nvidia.dali not found, using cv2 decode")
-		super().__init__(*args, **kwargs)
+		super().__init__(*args, channels=self.data.get("channels", 3), **kwargs)
 
 	def _build_dali_pipeline(self):
 		if self.dali_pipe is not None:
