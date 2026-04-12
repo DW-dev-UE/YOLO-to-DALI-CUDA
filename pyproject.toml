@@ -9,7 +9,7 @@
 	readme = "README.md"
 	requires-python = ">=3.8"
 	license = {text = "AGPL-3.0"}
-	keywords = ["YOLO", "DALI", "CUDA", "GPU", "deep-learning", "computer-vision", "object-detection"]
+	keywords = ["YOLO", "DALI", "CUDA", "GPU", "deep-learning", "computer-vision"]
 	authors = [
 		{name = "DW-dev-UE"}
 	]
@@ -48,14 +48,14 @@ dependencies = [
 	"Bug Reports" = "https://github.com/DW-dev-UE/YOLO-to-DALI-CUDA/issues"
 
 [project.scripts]
-	yolo = "ultralytics.cfg:entrypoint"
+	yolo = "ultralytics_dali.cfg:entrypoint"
 
 [tool.setuptools]
-	packages = {find = {where = ["."], include = ["ultralytics", "ultralytics.*"]}}
+	packages = {find = {where = ["."], include = ["ultralytics_dali", "ultralytics_dali.*"]}}
 
 [tool.setuptools.package-data]
-	"ultralytics" = ["**/*.yaml", "**/*.sh"]
-	"ultralytics.assets" = ["*.jpg"]
+	"ultralytics_dali" = ["**/*.yaml", "**/*.sh"]
+	"ultralytics_dali.assets" = ["*.jpg"]
 
 [tool.setuptools.dynamic]
-	version = {attr = "ultralytics.__version__"}
+	version = {attr = "ultralytics_dali.__version__"}
