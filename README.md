@@ -51,6 +51,11 @@ git clone https://github.com/DW-dev-UE/YOLO-to-DALI-CUDA.git
 
 ---
 
+## 🙏 Acknowledgments
+
+- Ultralytics Team
+- NVIDIA DALI Team
+
 ## 📜 License & Compliance
 
 This project is built upon Ultralytics’ open-source code.<br>
