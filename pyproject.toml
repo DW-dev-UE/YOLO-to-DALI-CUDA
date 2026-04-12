@@ -35,7 +35,8 @@ dependencies = [
 	"py-cpuinfo",
 	"pandas>=1.1.4",
 	"seaborn>=0.11.0",
-	"ultralytics-thop>=2.0.0"
+	"ultralytics-thop>=2.0.0",
+	"ultralytics>=8.0.0"
 ]
 
 [project.optional-dependencies]

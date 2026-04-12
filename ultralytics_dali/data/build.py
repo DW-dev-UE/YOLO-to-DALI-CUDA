@@ -244,7 +244,6 @@ def build_yolo_dataset(
 		classes=cfg.classes,
 		data=data,
 		fraction=cfg.fraction if mode == "train" else 1.0,
-		use_dali=(mode == "train" and getattr(cfg, "use_dali", False)),
 	)
 
 
