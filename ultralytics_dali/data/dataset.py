@@ -97,7 +97,15 @@ class YOLODataset(BaseDataset):
 		dev = max(LOCAL_RANK, 0)
 		otype = types.GRAY if self.channels == 1 else types.BGR
 
-		@pipeline_def(batch_size=1, num_threads=2, device_id=dev, seed=42)
+		@pipeline_def(
+			batch_size=1,
+			num_threads=2,
+			device_id=dev,
+			seed=42,
+			prefetch_queue_depth=1,
+			exec_async=False,
+			exec_pipelined=False,
+		)
 		def _pipe():
 			raw = fn.external_source(device="cpu", name="DALI_INPUT")
 			return fn.decoders.image(raw, device="mixed", output_type=otype)
@@ -118,7 +126,10 @@ class YOLODataset(BaseDataset):
 			if self.dali_pipe is None:
 				self._build_dali_pipeline()
 			with open(f, "rb") as fh:
-				data = [np.frombuffer(fh.read(), dtype=np.uint8)]
+				raw = fh.read()
+			if len(raw) == 0:
+				return None
+			data = [np.frombuffer(raw, dtype=np.uint8)]
 			self.dali_pipe.feed_input("DALI_INPUT", data)
 			(out,) = self.dali_pipe.run()
 			im = np.array(out[0].as_cpu())
@@ -127,6 +138,11 @@ class YOLODataset(BaseDataset):
 			return im
 		except Exception as e:
 			LOGGER.warning(f"{self.prefix}DALI decode error {f}: {e}")
+			# pipeline invalidated, rebuild next call
+			try:
+				del self.dali_pipe
+			except Exception:
+				pass
 			self.dali_pipe = None
 			return None
 
