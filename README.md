@@ -46,6 +46,8 @@ Please add your benchmark table here (this section is very important for this ty
 > INSTALL <br>
 
 ```bash
+pip install nvidia-dali-cuda120
+pip install ultralytics
 pip install git+https://github.com/DW-dev-UE/YOLO-to-DALI-CUDA.git
 ```
 
