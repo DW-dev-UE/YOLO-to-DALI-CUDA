@@ -1,6 +1,7 @@
 # DALI batch decoder - GPU decode + aspect-preserving resize
 
 from __future__ import annotations
+from .profiler import PROFILE
 
 from typing import List, Tuple
 
@@ -60,68 +61,87 @@ class DaliBatchDecoder:
 		return ext in DALI_SUPPORTED_EXT
 
 	def _cv2_decode_one(self, path: str) -> Tuple[np.ndarray, Tuple[int, int]]:
-		im = cv2.imread(path, self.cv2_flag)
-		if im is None:
-			raise FileNotFoundError(f"Image not readable: {path}")
-		h0, w0 = im.shape[:2]
-		r = self.max_size / max(h0, w0)
-		if r != 1:
-			w = min(int(round(w0 * r)), self.max_size)
-			h = min(int(round(h0 * r)), self.max_size)
-			im = cv2.resize(im, (w, h), interpolation=cv2.INTER_LINEAR)
-		if im.ndim == 2:
-			im = im[..., None]
-		return np.ascontiguousarray(im), (h0, w0)
+		with PROFILE.measure("cv2.decode_one.total"):
+			with PROFILE.measure("cv2.decode_one.imread"):
+				im = cv2.imread(path, self.cv2_flag)
+			if im is None:
+				raise FileNotFoundError(f"Image not readable: {path}")
+			h0, w0 = im.shape[:2]
+			r = self.max_size / max(h0, w0)
+			if r != 1:
+				w = min(int(round(w0 * r)), self.max_size)
+				h = min(int(round(h0 * r)), self.max_size)
+				with PROFILE.measure("cv2.decode_one.resize"):
+					im = cv2.resize(im, (w, h), interpolation=cv2.INTER_LINEAR)
+			if im.ndim == 2:
+				im = im[..., None]
+			return np.ascontiguousarray(im), (h0, w0)
 
 	def run(self, file_paths: List[str]) -> Tuple[List[np.ndarray], List[Tuple[int, int]]]:
 		"""Decode a batch. Unsupported or corrupt files transparently fall back to cv2."""
 		actual = len(file_paths)
 
-		# split into dali-eligible and fallback indices
-		dali_slots = []
-		fallback_slots = []
-		for i, p in enumerate(file_paths):
-			if self._is_dali_supported(p):
-				dali_slots.append(i)
-			else:
-				fallback_slots.append(i)
+		with PROFILE.measure("dali.run.total"):
+			dali_slots = []
+			fallback_slots = []
+			for i, p in enumerate(file_paths):
+				if self._is_dali_supported(p):
+					dali_slots.append(i)
+				else:
+					fallback_slots.append(i)
 
-		result_imgs: List[np.ndarray] = [None] * actual
-		result_shapes: List[Tuple[int, int]] = [None] * actual
+			result_imgs: List[np.ndarray] = [None] * actual
+			result_shapes: List[Tuple[int, int]] = [None] * actual
 
-		# cv2 fallback for unsupported extensions
-		for i in fallback_slots:
-			img, shp = self._cv2_decode_one(file_paths[i])
-			result_imgs[i] = img
-			result_shapes[i] = shp
+			if fallback_slots:
+				with PROFILE.measure("dali.run.cv2_fallback_unsupported"):
+					for i in fallback_slots:
+						with PROFILE.measure("dali.run.cv2_fallback_one"):
+							img, shp = self._cv2_decode_one(file_paths[i])
+						result_imgs[i] = img
+						result_shapes[i] = shp
 
-		# dali path (if any remain)
-		if dali_slots:
-			byte_batch = []
-			for i in dali_slots:
-				with open(file_paths[i], "rb") as fp:
-					byte_batch.append(np.frombuffer(fp.read(), dtype=np.uint8))
-			while len(byte_batch) < self.batch_size:
-				byte_batch.append(byte_batch[-1])
+			if dali_slots:
+				byte_batch = []
 
-			try:
-				self.pipeline.feed_input("jpegs", byte_batch)
-				out_imgs, out_shapes = self.pipeline.run()
-				imgs_cpu = out_imgs.as_cpu() if hasattr(out_imgs, "as_cpu") else out_imgs
-				shapes_cpu = out_shapes.as_cpu() if hasattr(out_shapes, "as_cpu") else out_shapes
+				with PROFILE.measure("dali.run.file_read_total"):
+					for i in dali_slots:
+						with PROFILE.measure("dali.run.file_read_one"):
+							with open(file_paths[i], "rb") as fp:
+								byte_batch.append(np.frombuffer(fp.read(), dtype=np.uint8))
 
-				for k, i in enumerate(dali_slots):
-					arr = np.asarray(imgs_cpu.at(k))
-					if arr.ndim == 2:
-						arr = arr[..., None]
-					result_imgs[i] = np.ascontiguousarray(arr)
-					shp = np.asarray(shapes_cpu.at(k))
-					result_shapes[i] = (int(shp[0]), int(shp[1]))
-			except Exception:
-				# whole-batch dali failure: fall back per-sample to cv2
-				for i in dali_slots:
-					img, shp = self._cv2_decode_one(file_paths[i])
-					result_imgs[i] = img
-					result_shapes[i] = shp
+				with PROFILE.measure("dali.run.pad_to_batch"):
+					while len(byte_batch) < self.batch_size:
+						byte_batch.append(byte_batch[-1])
 
-		return result_imgs, result_shapes
+				try:
+					with PROFILE.measure("dali.run.feed_input"):
+						self.pipeline.feed_input("jpegs", byte_batch)
+
+					with PROFILE.measure("dali.run.pipeline_run"):
+						out_imgs, out_shapes = self.pipeline.run()
+
+					with PROFILE.measure("dali.run.as_cpu"):
+						imgs_cpu = out_imgs.as_cpu() if hasattr(out_imgs, "as_cpu") else out_imgs
+						shapes_cpu = out_shapes.as_cpu() if hasattr(out_shapes, "as_cpu") else out_shapes
+
+					with PROFILE.measure("dali.run.unpack_outputs"):
+						for k, i in enumerate(dali_slots):
+							with PROFILE.measure("dali.run.unpack_one"):
+								arr = np.asarray(imgs_cpu.at(k))
+								if arr.ndim == 2:
+									arr = arr[..., None]
+								result_imgs[i] = np.ascontiguousarray(arr)
+
+								shp = np.asarray(shapes_cpu.at(k))
+								result_shapes[i] = (int(shp[0]), int(shp[1]))
+
+				except Exception:
+					with PROFILE.measure("dali.run.cv2_fallback_batch_exception"):
+						for i in dali_slots:
+							with PROFILE.measure("dali.run.cv2_fallback_one"):
+								img, shp = self._cv2_decode_one(file_paths[i])
+							result_imgs[i] = img
+							result_shapes[i] = shp
+
+			return result_imgs, result_shapes

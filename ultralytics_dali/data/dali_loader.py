@@ -1,6 +1,7 @@
 # DALI-backed dataloader. Drop-in replacement for InfiniteDataLoader when use_dali=True
 
 from __future__ import annotations
+from .profiler import PROFILE
 
 import math
 from typing import Iterator, List
@@ -71,32 +72,41 @@ class DaliDataLoader:
 
 	def _assemble_batch(self, batch_idx: List[int]):
 		ds = self.dataset
-		paths = [ds.im_files[i] for i in batch_idx]
-		decoded, ori_shapes = self.decoder.run(paths)
 
-		samples = []
-		for j, idx in enumerate(batch_idx):
-			img = decoded[j]
-			if img.ndim == 2:
-				img = img[..., None]
-			h0, w0 = ori_shapes[j]
+		with PROFILE.measure("loader.assemble_batch.total"):
+			with PROFILE.measure("loader.assemble_batch.collect_paths"):
+				paths = [ds.im_files[i] for i in batch_idx]
 
-			ds.ims[idx] = img
-			ds.im_hw0[idx] = (h0, w0)
-			ds.im_hw[idx] = img.shape[:2]
+			with PROFILE.measure("loader.assemble_batch.decoder_run"):
+				decoded, ori_shapes = self.decoder.run(paths)
 
-			if ds.augment and idx not in ds.buffer:
-				ds.buffer.append(idx)
-				if 1 < len(ds.buffer) >= ds.max_buffer_length:
-					old = ds.buffer.pop(0)
-					if getattr(ds, "cache", None) != "ram":
-						ds.ims[old] = None
-						ds.im_hw0[old] = None
-						ds.im_hw[old] = None
+			samples = []
+			with PROFILE.measure("loader.assemble_batch.per_sample_total"):
+				for j, idx in enumerate(batch_idx):
+					with PROFILE.measure("loader.assemble_batch.per_sample_one"):
+						img = decoded[j]
+						if img.ndim == 2:
+							img = img[..., None]
+						h0, w0 = ori_shapes[j]
 
-			samples.append(ds[idx])
+						ds.ims[idx] = img
+						ds.im_hw0[idx] = (h0, w0)
+						ds.im_hw[idx] = img.shape[:2]
 
-		return ds.collate_fn(samples)
+						if ds.augment and idx not in ds.buffer:
+							ds.buffer.append(idx)
+							if 1 < len(ds.buffer) >= ds.max_buffer_length:
+								old = ds.buffer.pop(0)
+								if getattr(ds, "cache", None) != "ram":
+									ds.ims[old] = None
+									ds.im_hw0[old] = None
+									ds.im_hw[old] = None
+
+						with PROFILE.measure("loader.assemble_batch.ds_getitem"):
+							samples.append(ds[idx])
+
+			with PROFILE.measure("loader.assemble_batch.collate"):
+				return ds.collate_fn(samples)
 
 
 def dali_available() -> bool:

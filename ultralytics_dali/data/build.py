@@ -1,6 +1,7 @@
 # Ultralytics AGPL-3.0 License - https://ultralytics.com/license
 
 from __future__ import annotations
+from .profiler import PROFILE
 
 import math
 import os
@@ -290,6 +291,9 @@ def build_dataloader(
 	pin_memory: bool = True,
 ):
 	"""Create dataloader. Uses DALI path if dataset.use_dali=True and DALI is importable."""
+	if PROFILE.enabled:
+		LOGGER.info("YOLO_PROFILE=1 profiling enabled")
+
 	batch = min(batch, len(dataset))
 	nd = torch.cuda.device_count()
 	nw = min(os.cpu_count() // max(nd, 1), workers)

@@ -1,6 +1,7 @@
 # Ultralytics AGPL-3.0 License - https://ultralytics.com/license
 
 from __future__ import annotations
+from .profiler import PROFILE
 
 import glob
 import math
@@ -187,44 +188,53 @@ class BaseDataset(Dataset):
 				self.labels[i]["cls"][:, 0] = 0
 
 	def load_image(self, i: int, rect_mode: bool = True) -> tuple[np.ndarray, tuple[int, int], tuple[int, int]]:
-		"""Load an image from the dataset."""
-		im, f, fn = self.ims[i], self.im_files[i], self.npy_files[i]
-		if im is None:  # not cached in RAM
-			if fn.exists():  # npy cache
-				try:
-					im = np.load(fn)
-				except Exception as e:
-					LOGGER.warning(f"{self.prefix}Removing corrupt *.npy image file {fn} due to: {e}")
-					Path(fn).unlink(missing_ok=True)
-					im = None
-			if im is None:  # npy miss or corrupt
-				im = self._decode_image(f)
+		with PROFILE.measure("base.load_image.total"):
+			im, f, fn = self.ims[i], self.im_files[i], self.npy_files[i]
 
 			if im is None:
-				raise FileNotFoundError(f"Image Not Found {f}")
+				if fn.exists():
+					try:
+						with PROFILE.measure("base.load_image.npy_load"):
+							im = np.load(fn)
+					except Exception as e:
+						LOGGER.warning(f"{self.prefix}Removing corrupt *.npy image file {fn} due to: {e}")
+						Path(fn).unlink(missing_ok=True)
+						im = None
 
-			h0, w0 = im.shape[:2]
-			if rect_mode:
-				r = self.imgsz / max(h0, w0)
-				if r != 1:
-					w, h = (min(math.ceil(w0 * r), self.imgsz), min(math.ceil(h0 * r), self.imgsz))
-					im = cv2.resize(im, (w, h), interpolation=cv2.INTER_LINEAR)
-			elif not (h0 == w0 == self.imgsz):
-				im = cv2.resize(im, (self.imgsz, self.imgsz), interpolation=cv2.INTER_LINEAR)
-			if im.ndim == 2:
-				im = im[..., None]
+				if im is None:
+					with PROFILE.measure("base.load_image.decode_image"):
+						im = self._decode_image(f)
 
-			if self.augment:
-				self.ims[i], self.im_hw0[i], self.im_hw[i] = im, (h0, w0), im.shape[:2]
-				self.buffer.append(i)
-				if 1 < len(self.buffer) >= self.max_buffer_length:
-					j = self.buffer.pop(0)
-					if self.cache != "ram":
-						self.ims[j], self.im_hw0[j], self.im_hw[j] = None, None, None
+				if im is None:
+					raise FileNotFoundError(f"Image Not Found {f}")
 
-			return im, (h0, w0), im.shape[:2]
+				h0, w0 = im.shape[:2]
 
-		return self.ims[i], self.im_hw0[i], self.im_hw[i]
+				if rect_mode:
+					r = self.imgsz / max(h0, w0)
+					if r != 1:
+						w, h = (min(math.ceil(w0 * r), self.imgsz), min(math.ceil(h0 * r), self.imgsz))
+						with PROFILE.measure("base.load_image.resize_rect"):
+							im = cv2.resize(im, (w, h), interpolation=cv2.INTER_LINEAR)
+				elif not (h0 == w0 == self.imgsz):
+					with PROFILE.measure("base.load_image.resize_square"):
+						im = cv2.resize(im, (self.imgsz, self.imgsz), interpolation=cv2.INTER_LINEAR)
+
+				if im.ndim == 2:
+					im = im[..., None]
+
+				if self.augment:
+					with PROFILE.measure("base.load_image.augment_buffer_update"):
+						self.ims[i], self.im_hw0[i], self.im_hw[i] = im, (h0, w0), im.shape[:2]
+						self.buffer.append(i)
+						if 1 < len(self.buffer) >= self.max_buffer_length:
+							j = self.buffer.pop(0)
+							if self.cache != "ram":
+								self.ims[j], self.im_hw0[j], self.im_hw[j] = None, None, None
+
+				return im, (h0, w0), im.shape[:2]
+
+			return self.ims[i], self.im_hw0[i], self.im_hw[i]
 
 	def _decode_image(self, f: str) -> np.ndarray:
 		"""Decode image from file. Subclasses can override for custom decode (e.g. DALI)."""
@@ -342,28 +352,30 @@ class BaseDataset(Dataset):
 		self.batch = bi  # batch index of image
 
 	def __getitem__(self, index: int) -> dict[str, Any]:
-		"""Return transformed label information for given index."""
-		return self.transforms(self.get_image_and_label(index))
+		with PROFILE.measure("base.__getitem__.total"):
+			with PROFILE.measure("base.__getitem__.get_image_and_label"):
+				item = self.get_image_and_label(index)
+			with PROFILE.measure("base.__getitem__.transforms"):
+				item = self.transforms(item)
+			return item
 
 	def get_image_and_label(self, index: int) -> dict[str, Any]:
-		"""Get and return label information from the dataset.
+		with PROFILE.measure("base.get_image_and_label.total"):
+			label = deepcopy(self.labels[index])
+			label.pop("shape", None)
 
-		Args:
-			index (int): Index of the image to retrieve.
+			with PROFILE.measure("base.get_image_and_label.load_image"):
+				label["img"], label["ori_shape"], label["resized_shape"] = self.load_image(index)
 
-		Returns:
-			(dict[str, Any]): Label dictionary with image and metadata.
-		"""
-		label = deepcopy(self.labels[index])  # requires deepcopy() https://github.com/ultralytics/ultralytics/pull/1948
-		label.pop("shape", None)  # shape is for rect, remove it
-		label["img"], label["ori_shape"], label["resized_shape"] = self.load_image(index)
-		label["ratio_pad"] = (
-			label["resized_shape"][0] / label["ori_shape"][0],
-			label["resized_shape"][1] / label["ori_shape"][1],
-		)  # for evaluation
-		if self.rect:
-			label["rect_shape"] = self.batch_shapes[self.batch[index]]
-		return self.update_labels_info(label)
+			label["ratio_pad"] = (
+				label["resized_shape"][0] / label["ori_shape"][0],
+				label["resized_shape"][1] / label["ori_shape"][1],
+			)
+			if self.rect:
+				label["rect_shape"] = self.batch_shapes[self.batch[index]]
+
+			with PROFILE.measure("base.get_image_and_label.update_labels_info"):
+				return self.update_labels_info(label)
 
 	def __len__(self) -> int:
 		"""Return the length of the labels list for the dataset."""
