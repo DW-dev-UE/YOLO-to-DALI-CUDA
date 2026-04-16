@@ -28,6 +28,9 @@ class _Cv2ImageProvider:
 	def decode(self, f: str) -> np.ndarray | None:
 		return imread(f, flags=self.cv2_flag)
 
+	def take(self, index: int, f: str | None = None) -> np.ndarray | None:
+		return None
+
 	def close(self) -> None:
 		return
 
@@ -147,9 +150,18 @@ class BaseDataset(Dataset):
 			im, f, fn = self.ims[i], self.im_files[i], self.npy_files[i]
 
 			if im is None:
+				prefetched = None
+				provider = getattr(self, "image_provider", None)
+				if provider is not None and hasattr(provider, "take"):
+					with PROFILE.measure("base.load_image.prefetch_take"):
+						prefetched = provider.take(i, f)
+
+				if prefetched is not None:
+					im = prefetched
+
 				allow_npy_cache = fn.exists() and not getattr(self, "use_dali", False)
 
-				if allow_npy_cache:
+				if im is None and allow_npy_cache:
 					try:
 						with PROFILE.measure("base.load_image.npy_load"):
 							im = np.load(fn)
@@ -161,9 +173,6 @@ class BaseDataset(Dataset):
 				if im is None:
 					with PROFILE.measure("base.load_image.decode_image"):
 						im = self._decode_image(f)
-
-				if im is None:
-					raise FileNotFoundError(f"Image Not Found {f}")
 
 				h0, w0 = im.shape[:2]
 

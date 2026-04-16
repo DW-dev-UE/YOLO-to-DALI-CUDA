@@ -4,6 +4,8 @@ from __future__ import annotations
 from .profiler import PROFILE
 
 from typing import List, Tuple
+from collections import OrderedDict
+from threading import Lock
 
 import cv2
 import numpy as np
@@ -152,18 +154,56 @@ class DaliBatchDecoder:
 
 
 class DaliImageProvider:
-	def __init__(self, channels: int = 3, device_id: int = 0, num_threads: int = 2):
-		self.decoder = DaliBatchDecoder(
-			batch_size=1,
-			max_size=None,
-			channels=channels,
-			device_id=device_id,
-			num_threads=num_threads,
-		)
+	def __init__(self, channels: int = 3, device_id: int = 0, num_threads: int = 2, max_cached: int = 4096):
+		if not DALI_AVAILABLE:
+			raise ImportError("nvidia-dali not installed")
+		self.channels = int(channels)
+		self.device_id = int(device_id)
+		self.num_threads = int(num_threads)
+		self.max_cached = int(max_cached)
+		self._decoders = {}
+		self._cache = OrderedDict()
+		self._lock = Lock()
+
+	def _get_decoder(self, batch_size: int) -> DaliBatchDecoder:
+		bs = int(batch_size)
+		dec = self._decoders.get(bs)
+		if dec is None:
+			dec = DaliBatchDecoder(
+				batch_size=bs,
+				max_size=None,
+				channels=self.channels,
+				device_id=self.device_id,
+				num_threads=self.num_threads,
+			)
+			self._decoders[bs] = dec
+		return dec
 
 	def decode(self, f: str) -> np.ndarray | None:
-		imgs, _ = self.decoder.run([f])
+		imgs, _ = self._get_decoder(1).run([f])
 		return imgs[0]
 
+	def prime(self, indices: list[int], paths: list[str]) -> None:
+		if not indices:
+			return
+
+		imgs, _ = self._get_decoder(len(paths)).run(paths)
+
+		with self._lock:
+			for idx, img in zip(indices, imgs):
+				key = int(idx)
+				self._cache[key] = np.ascontiguousarray(img)
+				self._cache.move_to_end(key)
+
+			while len(self._cache) > self.max_cached:
+				self._cache.popitem(last=False)
+
+	def take(self, index: int, f: str | None = None) -> np.ndarray | None:
+		key = int(index)
+		with self._lock:
+			return self._cache.pop(key, None)
+
 	def close(self) -> None:
-		return
+		with self._lock:
+			self._cache.clear()
+		self._decoders.clear()

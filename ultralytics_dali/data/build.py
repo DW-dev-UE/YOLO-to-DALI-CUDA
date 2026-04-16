@@ -298,10 +298,23 @@ def build_dataloader(
 	nw = min(os.cpu_count() // max(nd, 1), workers)
 
 	use_dali = getattr(dataset, "use_dali", False)
-
 	if use_dali:
-		LOGGER.info(colorstr("DALI: ") + f"provider mode enabled (parity-first, workers=0, imgsz={dataset.imgsz})")
-		nw = 0
+		try:
+			from .dali_loader import DaliPrefetchLoader, dali_available
+			if not dali_available():
+				LOGGER.warning("use_dali=True but nvidia-dali not importable, falling back to cv2 loader")
+			else:
+				LOGGER.info(colorstr("DALI: ") + f"prefetch-only helper enabled (batch={batch}, imgsz={dataset.imgsz})")
+				return DaliPrefetchLoader(
+					dataset=dataset,
+					batch_size=batch,
+					shuffle=shuffle,
+					rank=rank,
+					drop_last=drop_last and len(dataset) % batch != 0,
+					num_threads=max(2, nw // 2) if nw > 0 else 4,
+				)
+		except Exception as e:
+			LOGGER.warning(f"DALI prefetch loader init failed: {e}. Falling back to cv2 loader.")
 
 	sampler = (
 		None
