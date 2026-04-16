@@ -40,8 +40,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-	dali-cu12 = ["nvidia-dali-cuda120"]
-	dali-cu11 = ["nvidia-dali-cuda110"]
+	cuda12 = ["nvidia-dali-cuda120>=1.30"]
+	cuda11 = ["nvidia-dali-cuda110>=1.30"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["ultralytics_dali*"]
 
 [project.urls]
 	"Homepage" = "https://github.com/DW-dev-UE/YOLO-to-DALI-CUDA"

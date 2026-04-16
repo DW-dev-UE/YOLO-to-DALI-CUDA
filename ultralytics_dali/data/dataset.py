@@ -20,14 +20,6 @@ from ultralytics.utils.instance import Instances
 from ultralytics.utils.ops import resample_segments, segments2boxes
 from ultralytics.utils.torch_utils import TORCHVISION_0_18
 
-try:
-	from nvidia.dali.pipeline import pipeline_def
-	import nvidia.dali.fn as fn
-	import nvidia.dali.types as types
-	DALI_AVAILABLE = True
-except ImportError:
-	DALI_AVAILABLE = False
-
 from .augment import (
 	Compose,
 	Format,
@@ -65,6 +57,7 @@ class YOLODataset(BaseDataset):
 		use_keypoints (bool): Indicates if keypoints should be used for pose estimation.
 		use_obb (bool): Indicates if oriented bounding boxes should be used.
 		data (dict): Dataset configuration dictionary.
+		use_dali (bool): Flag that routes decoding through DaliDataLoader.
 
 	Methods:
 		cache_labels: Cache dataset labels, check images and read shapes.
@@ -79,72 +72,24 @@ class YOLODataset(BaseDataset):
 		>>> dataset.get_labels()
 	"""
 
-	def __init__(self, *args, data=None, task="detect", use_dali: bool = False, **kwargs):
-		self.use_segments = task != "obb" and task == "segment"
+	def __init__(self, *args, data: dict | None = None, task: str = "detect",
+	             use_dali: bool = False, **kwargs):
+		"""Initialize the YOLODataset.
+
+		Args:
+			data (dict, optional): Dataset configuration dictionary.
+			task (str): Task type, one of 'detect', 'segment', 'pose', or 'obb'.
+			use_dali (bool): Flag for DaliDataLoader. Actual DALI pipeline lives in the loader, not here.
+			*args (Any): Additional positional arguments for the parent class.
+			**kwargs (Any): Additional keyword arguments for the parent class.
+		"""
+		self.use_dali = use_dali
+		self.use_segments = task == "segment"
 		self.use_keypoints = task == "pose"
 		self.use_obb = task == "obb"
 		self.data = data
-		assert data, "data argument is required"
-		self.use_dali = use_dali and DALI_AVAILABLE
-		self.dali_pipe = None
-		if use_dali and not DALI_AVAILABLE:
-			LOGGER.warning("nvidia.dali not found, using cv2 decode")
+		assert not (self.use_segments and self.use_keypoints), "Can not use both segments and keypoints."
 		super().__init__(*args, channels=self.data.get("channels", 3), **kwargs)
-
-	def _build_dali_pipeline(self):
-		if self.dali_pipe is not None:
-			return
-		dev = max(LOCAL_RANK, 0)
-		otype = types.GRAY if self.channels == 1 else types.BGR
-
-		@pipeline_def(
-			batch_size=1,
-			num_threads=2,
-			device_id=dev,
-			seed=42,
-			prefetch_queue_depth=1,
-			exec_async=False,
-			exec_pipelined=False,
-		)
-		def _pipe():
-			raw = fn.external_source(device="cpu", name="DALI_INPUT")
-			return fn.decoders.image(raw, device="mixed", output_type=otype)
-
-		self.dali_pipe = _pipe()
-		self.dali_pipe.build()
-
-	def _decode_image(self, f: str) -> np.ndarray:
-		"""Decode image with DALI if enabled, otherwise cv2."""
-		if self.use_dali:
-			im = self._dali_decode(f)
-			if im is not None:
-				return im
-		return super()._decode_image(f)
-
-	def _dali_decode(self, f: str) -> np.ndarray | None:
-		try:
-			if self.dali_pipe is None:
-				self._build_dali_pipeline()
-			with open(f, "rb") as fh:
-				raw = fh.read()
-			if len(raw) == 0:
-				return None
-			data = [np.frombuffer(raw, dtype=np.uint8)]
-			self.dali_pipe.feed_input("DALI_INPUT", data)
-			(out,) = self.dali_pipe.run()
-			im = np.array(out[0].as_cpu())
-			if self.channels == 1 and im.ndim == 3:
-				im = im[:, :, 0]
-			return im
-		except Exception as e:
-			LOGGER.warning(f"{self.prefix}DALI decode error {f}: {e}")
-			# pipeline invalidated, rebuild next call
-			try:
-				del self.dali_pipe
-			except Exception:
-				pass
-			self.dali_pipe = None
-			return None
 
 	def cache_labels(self, path: Path = Path("./labels.cache")) -> dict:
 		"""Cache dataset labels, check images and read shapes.

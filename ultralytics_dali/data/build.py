@@ -17,7 +17,7 @@ from PIL import Image
 from torch.utils.data import Dataset, dataloader, distributed
 
 from ultralytics.cfg import IterableSimpleNamespace
-from ultralytics_dali.data.dataset import GroundingDataset, YOLODataset, YOLOMultiModalDataset
+from .dataset import GroundingDataset, YOLODataset, YOLOMultiModalDataset
 from ultralytics.data.loaders import (
 	LOADERS,
 	LoadImagesAndVideos,
@@ -29,7 +29,7 @@ from ultralytics.data.loaders import (
 	autocast_list,
 )
 from ultralytics.data.utils import IMG_FORMATS, VID_FORMATS
-from ultralytics.utils import RANK, colorstr
+from ultralytics.utils import LOGGER, RANK, colorstr
 from ultralytics.utils.checks import check_file
 from ultralytics.utils.torch_utils import TORCH_2_0
 
@@ -227,6 +227,7 @@ def build_yolo_dataset(
 	stride: int = 32,
 	multi_modal: bool = False,
 ) -> Dataset:
+	"""Build and return a YOLO dataset based on configuration parameters."""
 	dataset = YOLOMultiModalDataset if multi_modal else YOLODataset
 	return dataset(
 		img_path=img_path,
@@ -244,7 +245,7 @@ def build_yolo_dataset(
 		classes=cfg.classes,
 		data=data,
 		fraction=cfg.fraction if mode == "train" else 1.0,
-		use_dali=getattr(cfg, "use_dali", False),  # 이거 추가
+		use_dali=getattr(cfg, "use_dali", False),
 	)
 
 
@@ -265,9 +266,9 @@ def build_grounding(
 		max_samples=max_samples,
 		imgsz=cfg.imgsz,
 		batch_size=batch,
-		augment=mode == "train",  # augmentation
-		hyp=cfg,  # TODO: probably add a get_hyps_from_cfg function
-		rect=cfg.rect or rect,  # rectangular batches
+		augment=mode == "train",
+		hyp=cfg,
+		rect=cfg.rect or rect,
 		cache=cfg.cache or None,
 		single_cls=cfg.single_cls or False,
 		stride=stride,
@@ -287,15 +288,32 @@ def build_dataloader(
 	rank: int = -1,
 	drop_last: bool = False,
 	pin_memory: bool = True,
-) -> InfiniteDataLoader:
+):
+	"""Create dataloader. Uses DALI path if dataset.use_dali=True and DALI is importable."""
 	batch = min(batch, len(dataset))
 	nd = torch.cuda.device_count()
 	nw = min(os.cpu_count() // max(nd, 1), workers)
 
-	# DALI uses CUDA context which can't survive fork(), must run in main process
-	if getattr(dataset, "use_dali", False):
-		nw = 0
+	use_dali = getattr(dataset, "use_dali", False)
+	if use_dali:
+		try:
+			from .dali_loader import DaliDataLoader, dali_available
+			if not dali_available():
+				LOGGER.warning("use_dali=True but nvidia-dali not importable, falling back to cv2 loader")
+			else:
+				LOGGER.info(colorstr("DALI: ") + f"enabled (batch={batch}, imgsz={dataset.imgsz})")
+				return DaliDataLoader(
+					dataset=dataset,
+					batch_size=batch,
+					shuffle=shuffle,
+					rank=rank,
+					drop_last=drop_last and len(dataset) % batch != 0,
+					num_threads=max(2, nw // 2) if nw > 0 else 4,
+				)
+		except Exception as e:
+			LOGGER.warning(f"DALI loader init failed: {e}. Falling back to cv2 loader.")
 
+	# fallback: original InfiniteDataLoader path
 	sampler = (
 		None
 		if rank == -1
