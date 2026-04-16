@@ -67,3 +67,6 @@ class StageProfiler:
 				f"avg={avg * 1000.0:10.3f}ms "
 				f"max={maxv * 1000.0:10.3f}ms"
 			)
+
+
+PROFILE = StageProfiler()
