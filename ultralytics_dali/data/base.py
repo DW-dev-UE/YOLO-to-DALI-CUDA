@@ -21,55 +21,18 @@ from ultralytics.utils import DEFAULT_CFG, LOCAL_RANK, LOGGER, NUM_THREADS, TQDM
 from ultralytics.utils.patches import imread
 
 
+class _Cv2ImageProvider:
+	def __init__(self, cv2_flag: int):
+		self.cv2_flag = cv2_flag
+
+	def decode(self, f: str) -> np.ndarray | None:
+		return imread(f, flags=self.cv2_flag)
+
+	def close(self) -> None:
+		return
+
+
 class BaseDataset(Dataset):
-	"""Base dataset class for loading and processing image data.
-
-	This class provides core functionality for loading images, caching, and preparing data for training and inference in
-	object detection tasks.
-
-	Attributes:
-		img_path (str): Path to the folder containing images.
-		imgsz (int): Target image size for resizing.
-		augment (bool): Whether to apply data augmentation.
-		single_cls (bool): Whether to treat all objects as a single class.
-		prefix (str): Prefix to print in log messages.
-		fraction (float): Fraction of dataset to utilize.
-		channels (int): Number of channels in the images (1 for grayscale, 3 for color). Color images loaded with OpenCV
-			are in BGR channel order.
-		cv2_flag (int): OpenCV flag for reading images.
-		im_files (list[str]): List of image file paths.
-		labels (list[dict]): List of label data dictionaries.
-		ni (int): Number of images in the dataset.
-		rect (bool): Whether to use rectangular training.
-		batch_size (int): Size of batches.
-		stride (int): Stride used in the model.
-		pad (float): Padding value.
-		buffer (list): Buffer for mosaic images.
-		max_buffer_length (int): Maximum buffer size.
-		ims (list): List of loaded images.
-		im_hw0 (list): List of original image dimensions (h, w).
-		im_hw (list): List of resized image dimensions (h, w).
-		npy_files (list[Path]): List of numpy file paths.
-		cache (str): Cache images to RAM or disk during training.
-		transforms (callable): Image transformation function.
-		batch_shapes (np.ndarray): Batch shapes for rectangular training.
-		batch (np.ndarray): Batch index of each image.
-
-	Methods:
-		get_img_files: Read image files from the specified path.
-		update_labels: Update labels to include only specified classes.
-		load_image: Load an image from the dataset.
-		cache_images: Cache images to memory or disk.
-		cache_images_to_disk: Save an image as an *.npy file for faster loading.
-		check_cache_disk: Check image caching requirements vs available disk space.
-		check_cache_ram: Check image caching requirements vs available memory.
-		set_rectangle: Set the shape of bounding boxes as rectangles.
-		get_image_and_label: Get and return label information from the dataset.
-		update_labels_info: Custom label format method to be implemented by subclasses.
-		build_transforms: Build transformation pipeline to be implemented by subclasses.
-		get_labels: Get labels method to be implemented by subclasses.
-	"""
-
 	def __init__(
 		self,
 		img_path: str | list[str],
@@ -87,7 +50,6 @@ class BaseDataset(Dataset):
 		fraction: float = 1.0,
 		channels: int = 3,
 	):
-		"""Initialize BaseDataset with given configuration and options."""
 		super().__init__()
 		self.img_path = img_path
 		self.imgsz = imgsz
@@ -97,10 +59,13 @@ class BaseDataset(Dataset):
 		self.fraction = fraction
 		self.channels = channels
 		self.cv2_flag = cv2.IMREAD_GRAYSCALE if channels == 1 else cv2.IMREAD_COLOR
+
+		self.image_provider = _Cv2ImageProvider(self.cv2_flag)
+
 		self.im_files = self.get_img_files(self.img_path)
 		self.labels = self.get_labels()
-		self.update_labels(include_class=classes)  # single_cls and include_class
-		self.ni = len(self.labels)  # number of images
+		self.update_labels(include_class=classes)
+		self.ni = len(self.labels)
 		self.rect = rect
 		self.batch_size = batch_size
 		self.stride = stride
@@ -109,11 +74,9 @@ class BaseDataset(Dataset):
 			assert self.batch_size is not None
 			self.set_rectangle()
 
-		# Buffer thread for mosaic images
-		self.buffer = []  # buffer size = batch size
+		self.buffer = []
 		self.max_buffer_length = min((self.ni, self.batch_size * 8, 1000)) if self.augment else 0
 
-		# Cache images (options are cache = True, False, None, "ram", "disk")
 		self.ims, self.im_hw0, self.im_hw = [None] * self.ni, [None] * self.ni, [None] * self.ni
 		self.npy_files = [Path(f).with_suffix(".npy") for f in self.im_files]
 		self.cache = cache.lower() if isinstance(cache, str) else "ram" if cache is True else None
@@ -127,32 +90,29 @@ class BaseDataset(Dataset):
 		elif self.cache == "disk" and self.check_cache_disk():
 			self.cache_images()
 
-		# Transforms
 		self.transforms = self.build_transforms(hyp=hyp)
 
+	def set_image_provider(self, provider) -> None:
+		old = getattr(self, "image_provider", None)
+		if old is not None and hasattr(old, "close"):
+			try:
+				old.close()
+			except Exception:
+				pass
+		self.image_provider = provider
+
 	def get_img_files(self, img_path: str | list[str]) -> list[str]:
-		"""Read image files from the specified path.
-
-		Args:
-			img_path (str | list[str]): Path or list of paths to image directories or files.
-
-		Returns:
-			(list[str]): List of image file paths.
-
-		Raises:
-			FileNotFoundError: If no images are found or the path doesn't exist.
-		"""
 		try:
-			f = []  # image files
+			f = []
 			for p in img_path if isinstance(img_path, list) else [img_path]:
-				p = Path(p)  # os-agnostic
-				if p.is_dir():  # dir
+				p = Path(p)
+				if p.is_dir():
 					f += glob.glob(str(p / "**" / "*.*"), recursive=True)
-				elif p.is_file():  # file
+				elif p.is_file():
 					with open(p, encoding="utf-8") as t:
 						t = t.read().strip().splitlines()
 						parent = str(p.parent) + os.sep
-						f += [x.replace("./", parent) if x.startswith("./") else x for x in t]  # local to global path
+						f += [x.replace("./", parent) if x.startswith("./") else x for x in t]
 				else:
 					raise FileNotFoundError(f"{self.prefix}{p} does not exist")
 			im_files = sorted(x.replace("/", os.sep) for x in f if x.rpartition(".")[-1].lower() in IMG_FORMATS)
@@ -160,16 +120,11 @@ class BaseDataset(Dataset):
 		except Exception as e:
 			raise FileNotFoundError(f"{self.prefix}Error loading data from {img_path}\n{HELP_URL}") from e
 		if self.fraction < 1:
-			im_files = im_files[: round(len(im_files) * self.fraction)]  # retain a fraction of the dataset
-		check_file_speeds(im_files, prefix=self.prefix)  # check image read speeds
+			im_files = im_files[: round(len(im_files) * self.fraction)]
+		check_file_speeds(im_files, prefix=self.prefix)
 		return im_files
 
 	def update_labels(self, include_class: list[int] | None) -> None:
-		"""Update labels to include only specified classes.
-
-		Args:
-			include_class (list[int], optional): List of classes to include. If None, all classes are included.
-		"""
 		include_class_array = np.array(include_class).reshape(1, -1)
 		for i in range(len(self.labels)):
 			if include_class is not None:
@@ -192,7 +147,9 @@ class BaseDataset(Dataset):
 			im, f, fn = self.ims[i], self.im_files[i], self.npy_files[i]
 
 			if im is None:
-				if fn.exists():
+				allow_npy_cache = fn.exists() and not getattr(self, "use_dali", False)
+
+				if allow_npy_cache:
 					try:
 						with PROFILE.measure("base.load_image.npy_load"):
 							im = np.load(fn)
@@ -236,13 +193,11 @@ class BaseDataset(Dataset):
 
 			return self.ims[i], self.im_hw0[i], self.im_hw[i]
 
-	def _decode_image(self, f: str) -> np.ndarray:
-		"""Decode image from file. Subclasses can override for custom decode (e.g. DALI)."""
-		return imread(f, flags=self.cv2_flag)
+	def _decode_image(self, f: str) -> np.ndarray | None:
+		return self.image_provider.decode(f)
 
 	def cache_images(self) -> None:
-		"""Cache images to memory or disk for faster training."""
-		b, gb = 0, 1 << 30  # bytes of cached images, bytes per gigabytes
+		b, gb = 0, 1 << 30
 		fcn, storage = (self.cache_images_to_disk, "Disk") if self.cache == "disk" else (self.load_image, "RAM")
 		with ThreadPool(NUM_THREADS) as pool:
 			results = pool.imap(fcn, range(self.ni))
@@ -250,31 +205,24 @@ class BaseDataset(Dataset):
 			for i, x in pbar:
 				if self.cache == "disk":
 					b += self.npy_files[i].stat().st_size
-				else:  # 'ram'
-					self.ims[i], self.im_hw0[i], self.im_hw[i] = x  # im, hw_orig, hw_resized = load_image(self, i)
+				else:
+					self.ims[i], self.im_hw0[i], self.im_hw[i] = x
 					b += self.ims[i].nbytes
 				pbar.desc = f"{self.prefix}Caching images ({b / gb:.1f}GB {storage})"
 			pbar.close()
 
 	def cache_images_to_disk(self, i: int) -> None:
-		"""Save an image as an *.npy file for faster loading."""
 		f = self.npy_files[i]
 		if not f.exists():
-			np.save(f.as_posix(), imread(self.im_files[i], flags=self.cv2_flag), allow_pickle=False)
+			im = self._decode_image(self.im_files[i])
+			if im is not None:
+				np.save(f.as_posix(), im, allow_pickle=False)
 
 	def check_cache_disk(self, safety_margin: float = 0.5) -> bool:
-		"""Check if there's enough disk space for caching images.
-
-		Args:
-			safety_margin (float): Safety margin factor for disk space calculation.
-
-		Returns:
-			(bool): True if there's enough disk space, False otherwise.
-		"""
 		import shutil
 
-		b, gb = 0, 1 << 30  # bytes of cached images, bytes per gigabytes
-		n = min(self.ni, 30)  # extrapolate from 30 random images
+		b, gb = 0, 1 << 30
+		n = min(self.ni, 30)
 		for _ in range(n):
 			im_file = random.choice(self.im_files)
 			im = imread(im_file)
@@ -285,7 +233,7 @@ class BaseDataset(Dataset):
 				self.cache = None
 				LOGGER.warning(f"{self.prefix}Skipping caching images to disk, directory not writable")
 				return False
-		disk_required = b * self.ni / n * (1 + safety_margin)  # bytes required to cache dataset to disk
+		disk_required = b * self.ni / n * (1 + safety_margin)
 		total, _used, free = shutil.disk_usage(Path(self.im_files[0]).parent)
 		if disk_required > free:
 			self.cache = None
@@ -298,23 +246,15 @@ class BaseDataset(Dataset):
 		return True
 
 	def check_cache_ram(self, safety_margin: float = 0.5) -> bool:
-		"""Check if there's enough RAM for caching images.
-
-		Args:
-			safety_margin (float): Safety margin factor for RAM calculation.
-
-		Returns:
-			(bool): True if there's enough RAM, False otherwise.
-		"""
-		b, gb = 0, 1 << 30  # bytes of cached images, bytes per gigabytes
-		n = min(self.ni, 30)  # extrapolate from 30 random images
+		b, gb = 0, 1 << 30
+		n = min(self.ni, 30)
 		for _ in range(n):
-			im = imread(random.choice(self.im_files))  # sample image
+			im = imread(random.choice(self.im_files))
 			if im is None:
 				continue
-			ratio = self.imgsz / max(im.shape[0], im.shape[1])  # max(h, w)  # ratio
+			ratio = self.imgsz / max(im.shape[0], im.shape[1])
 			b += im.nbytes * ratio**2
-		mem_required = b * self.ni / n * (1 + safety_margin)  # GB required to cache dataset into RAM
+		mem_required = b * self.ni / n * (1 + safety_margin)
 		mem = __import__("psutil").virtual_memory()
 		if mem_required > mem.available:
 			self.cache = None
@@ -327,18 +267,16 @@ class BaseDataset(Dataset):
 		return True
 
 	def set_rectangle(self) -> None:
-		"""Set the shape of bounding boxes for YOLO detections as rectangles."""
-		bi = np.floor(np.arange(self.ni) / self.batch_size).astype(int)  # batch index
-		nb = bi[-1] + 1  # number of batches
+		bi = np.floor(np.arange(self.ni) / self.batch_size).astype(int)
+		nb = bi[-1] + 1
 
-		s = np.array([x.pop("shape") for x in self.labels])  # hw
-		ar = s[:, 0] / s[:, 1]  # aspect ratio
+		s = np.array([x.pop("shape") for x in self.labels])
+		ar = s[:, 0] / s[:, 1]
 		irect = ar.argsort()
 		self.im_files = [self.im_files[i] for i in irect]
 		self.labels = [self.labels[i] for i in irect]
 		ar = ar[irect]
 
-		# Set training image shapes
 		shapes = [[1, 1]] * nb
 		for i in range(nb):
 			ari = ar[bi == i]
@@ -349,7 +287,7 @@ class BaseDataset(Dataset):
 				shapes[i] = [1, 1 / mini]
 
 		self.batch_shapes = np.ceil(np.array(shapes) * self.imgsz / self.stride + self.pad).astype(int) * self.stride
-		self.batch = bi  # batch index of image
+		self.batch = bi
 
 	def __getitem__(self, index: int) -> dict[str, Any]:
 		with PROFILE.measure("base.__getitem__.total"):
@@ -378,40 +316,13 @@ class BaseDataset(Dataset):
 				return self.update_labels_info(label)
 
 	def __len__(self) -> int:
-		"""Return the length of the labels list for the dataset."""
 		return len(self.labels)
 
 	def update_labels_info(self, label: dict[str, Any]) -> dict[str, Any]:
-		"""Custom your label format here."""
 		return label
 
 	def build_transforms(self, hyp: dict[str, Any] | None = None):
-		"""Users can customize augmentations here.
-
-		Examples:
-			>>> if self.augment:
-			...     # Training transforms
-			...     return Compose([])
-			>>> else:
-			...    # Val transforms
-			...    return Compose([])
-		"""
 		raise NotImplementedError
 
 	def get_labels(self) -> list[dict[str, Any]]:
-		"""Users can customize their own format here.
-
-		Examples:
-			Ensure output is a dictionary with the following keys:
-			>>> dict(
-			...     im_file=im_file,
-			...     shape=shape,  # format: (height, width)
-			...     cls=cls,
-			...     bboxes=bboxes,  # xywh
-			...     segments=segments,  # xy
-			...     keypoints=keypoints,  # xy
-			...     normalized=True,  # or False
-			...     bbox_format="xyxy",  # or xywh, ltwh
-			... )
-		"""
 		raise NotImplementedError

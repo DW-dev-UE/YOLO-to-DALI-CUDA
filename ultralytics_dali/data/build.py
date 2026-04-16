@@ -290,7 +290,6 @@ def build_dataloader(
 	drop_last: bool = False,
 	pin_memory: bool = True,
 ):
-	"""Create dataloader. Uses DALI path if dataset.use_dali=True and DALI is importable."""
 	if PROFILE.enabled:
 		LOGGER.info("YOLO_PROFILE=1 profiling enabled")
 
@@ -299,25 +298,11 @@ def build_dataloader(
 	nw = min(os.cpu_count() // max(nd, 1), workers)
 
 	use_dali = getattr(dataset, "use_dali", False)
-	if use_dali:
-		try:
-			from .dali_loader import DaliDataLoader, dali_available
-			if not dali_available():
-				LOGGER.warning("use_dali=True but nvidia-dali not importable, falling back to cv2 loader")
-			else:
-				LOGGER.info(colorstr("DALI: ") + f"enabled (batch={batch}, imgsz={dataset.imgsz})")
-				return DaliDataLoader(
-					dataset=dataset,
-					batch_size=batch,
-					shuffle=shuffle,
-					rank=rank,
-					drop_last=drop_last and len(dataset) % batch != 0,
-					num_threads=max(2, nw // 2) if nw > 0 else 4,
-				)
-		except Exception as e:
-			LOGGER.warning(f"DALI loader init failed: {e}. Falling back to cv2 loader.")
 
-	# fallback: original InfiniteDataLoader path
+	if use_dali:
+		LOGGER.info(colorstr("DALI: ") + f"provider mode enabled (parity-first, workers=0, imgsz={dataset.imgsz})")
+		nw = 0
+
 	sampler = (
 		None
 		if rank == -1

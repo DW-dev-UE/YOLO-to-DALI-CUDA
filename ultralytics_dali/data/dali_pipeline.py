@@ -19,14 +19,12 @@ DALI_SUPPORTED_EXT = {"jpg", "jpeg", "png", "bmp", "tiff", "tif", "webp", "pnm",
 
 
 class DaliBatchDecoder:
-	"""Batch decode + resize on GPU. Variable output shape per sample."""
-
-	def __init__(self, batch_size: int, max_size: int, channels: int = 3,
+	def __init__(self, batch_size: int, max_size: int | None = None, channels: int = 3,
 	             device_id: int = 0, num_threads: int = 4):
 		if not DALI_AVAILABLE:
 			raise ImportError("nvidia-dali not installed")
 		self.batch_size = int(batch_size)
-		self.max_size = int(max_size)
+		self.max_size = None if max_size is None else int(max_size)
 		self.channels = int(channels)
 		self.device_id = int(device_id)
 		self.num_threads = int(num_threads)
@@ -37,19 +35,25 @@ class DaliBatchDecoder:
 		max_size = self.max_size
 		out_type = types.GRAY if self.channels == 1 else types.BGR
 
-		@pipeline_def(batch_size=self.batch_size, num_threads=self.num_threads,
-		              device_id=self.device_id, prefetch_queue_depth=1,
-		              exec_async=False, exec_pipelined=False)
+		@pipeline_def(
+			batch_size=self.batch_size,
+			num_threads=self.num_threads,
+			device_id=self.device_id,
+			prefetch_queue_depth=1,
+			exec_async=False,
+			exec_pipelined=False,
+		)
 		def _pipe():
 			jpegs = fn.external_source(name="jpegs", device="cpu", no_copy=False)
 			shapes = fn.peek_image_shape(jpegs)
 			imgs = fn.decoders.image(jpegs, device="mixed", output_type=out_type)
-			imgs = fn.resize(
-				imgs,
-				resize_longer=max_size,
-				interp_type=types.INTERP_LINEAR,
-				antialias=False,
-			)
+			if max_size is not None and max_size > 0:
+				imgs = fn.resize(
+					imgs,
+					resize_longer=max_size,
+					interp_type=types.INTERP_LINEAR,
+					antialias=False,
+				)
 			return imgs, shapes
 
 		self.pipeline = _pipe()
@@ -67,18 +71,18 @@ class DaliBatchDecoder:
 			if im is None:
 				raise FileNotFoundError(f"Image not readable: {path}")
 			h0, w0 = im.shape[:2]
-			r = self.max_size / max(h0, w0)
-			if r != 1:
-				w = min(int(round(w0 * r)), self.max_size)
-				h = min(int(round(h0 * r)), self.max_size)
-				with PROFILE.measure("cv2.decode_one.resize"):
-					im = cv2.resize(im, (w, h), interpolation=cv2.INTER_LINEAR)
+			if self.max_size is not None and self.max_size > 0:
+				r = self.max_size / max(h0, w0)
+				if r != 1:
+					w = min(int(round(w0 * r)), self.max_size)
+					h = min(int(round(h0 * r)), self.max_size)
+					with PROFILE.measure("cv2.decode_one.resize"):
+						im = cv2.resize(im, (w, h), interpolation=cv2.INTER_LINEAR)
 			if im.ndim == 2:
 				im = im[..., None]
 			return np.ascontiguousarray(im), (h0, w0)
 
 	def run(self, file_paths: List[str]) -> Tuple[List[np.ndarray], List[Tuple[int, int]]]:
-		"""Decode a batch. Unsupported or corrupt files transparently fall back to cv2."""
 		actual = len(file_paths)
 
 		with PROFILE.measure("dali.run.total"):
@@ -145,3 +149,21 @@ class DaliBatchDecoder:
 							result_shapes[i] = shp
 
 			return result_imgs, result_shapes
+
+
+class DaliImageProvider:
+	def __init__(self, channels: int = 3, device_id: int = 0, num_threads: int = 2):
+		self.decoder = DaliBatchDecoder(
+			batch_size=1,
+			max_size=None,
+			channels=channels,
+			device_id=device_id,
+			num_threads=num_threads,
+		)
+
+	def decode(self, f: str) -> np.ndarray | None:
+		imgs, _ = self.decoder.run([f])
+		return imgs[0]
+
+	def close(self) -> None:
+		return

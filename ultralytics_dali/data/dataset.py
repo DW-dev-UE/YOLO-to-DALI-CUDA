@@ -73,16 +73,7 @@ class YOLODataset(BaseDataset):
 	"""
 
 	def __init__(self, *args, data: dict | None = None, task: str = "detect",
-	             use_dali: bool = False, **kwargs):
-		"""Initialize the YOLODataset.
-
-		Args:
-			data (dict, optional): Dataset configuration dictionary.
-			task (str): Task type, one of 'detect', 'segment', 'pose', or 'obb'.
-			use_dali (bool): Flag for DaliDataLoader. Actual DALI pipeline lives in the loader, not here.
-			*args (Any): Additional positional arguments for the parent class.
-			**kwargs (Any): Additional keyword arguments for the parent class.
-		"""
+             use_dali: bool = False, **kwargs):
 		self.use_dali = use_dali
 		self.use_segments = task == "segment"
 		self.use_keypoints = task == "pose"
@@ -90,6 +81,26 @@ class YOLODataset(BaseDataset):
 		self.data = data
 		assert not (self.use_segments and self.use_keypoints), "Can not use both segments and keypoints."
 		super().__init__(*args, channels=self.data.get("channels", 3), **kwargs)
+
+		if self.use_dali:
+			try:
+				from .dali_pipeline import DALI_AVAILABLE, DaliImageProvider
+				if not DALI_AVAILABLE:
+					LOGGER.warning("use_dali=True but nvidia-dali not importable, using cv2 provider")
+					self.use_dali = False
+				else:
+					device_id = max(LOCAL_RANK, 0) if torch.cuda.is_available() else 0
+					self.set_image_provider(
+						DaliImageProvider(
+							channels=self.channels,
+							device_id=device_id,
+							num_threads=2,
+						)
+					)
+					LOGGER.info(colorstr("DALI: ") + "provider attached to BaseDataset.load_image()")
+			except Exception as e:
+				LOGGER.warning(f"Failed to attach DALI image provider: {e}. Using cv2 provider.")
+				self.use_dali = False
 
 	def cache_labels(self, path: Path = Path("./labels.cache")) -> dict:
 		"""Cache dataset labels, check images and read shapes.
