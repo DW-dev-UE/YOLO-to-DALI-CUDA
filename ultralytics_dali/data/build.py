@@ -20,6 +20,7 @@ from torch.utils.data import Dataset, dataloader, distributed
 from ultralytics.cfg import IterableSimpleNamespace
 from .base import _Cv2ImageProvider
 from .dataset import GroundingDataset, YOLODataset, YOLOMultiModalDataset
+
 from ultralytics.data.loaders import (
 	LOADERS,
 	LoadImagesAndVideos,
@@ -140,6 +141,28 @@ def seed_worker(worker_id: int) -> None:
 	random.seed(worker_seed)
 
 
+def _attach_dali_provider(dataset, workers: int, batch: int):
+	from .dali_pipeline import DALI_AVAILABLE, DaliImageProvider
+
+	if not DALI_AVAILABLE:
+		raise RuntimeError("use_dali=True but nvidia-dali is not installed")
+	if not torch.cuda.is_available():
+		raise RuntimeError("use_dali=True requires CUDA")
+
+	device_id = torch.cuda.current_device()
+	num_threads = max(2, workers) if workers > 0 else 2
+	max_cached = max(batch * max(workers, 1) * 4, 4096)
+	dataset.set_image_provider(
+		DaliImageProvider(
+			channels=getattr(dataset, "channels", 3),
+			device_id=device_id,
+			num_threads=num_threads,
+			max_cached=max_cached,
+		)
+	)
+	return dataset
+
+
 def build_yolo_dataset(
 	cfg: IterableSimpleNamespace,
 	img_path: str,
@@ -152,6 +175,7 @@ def build_yolo_dataset(
 ) -> Dataset:
 	"""Build and return a YOLO dataset based on configuration parameters."""
 	dataset = YOLOMultiModalDataset if multi_modal else YOLODataset
+	use_dali = getattr(cfg, "use_dali", False)
 	return dataset(
 		img_path=img_path,
 		imgsz=cfg.imgsz,
@@ -159,7 +183,7 @@ def build_yolo_dataset(
 		augment=mode == "train",
 		hyp=cfg,
 		rect=cfg.rect or rect,
-		cache=cfg.cache or None,
+		cache=None if use_dali else (cfg.cache or None),
 		single_cls=cfg.single_cls or False,
 		stride=stride,
 		pad=0.0 if mode == "train" else 0.5,
@@ -168,7 +192,7 @@ def build_yolo_dataset(
 		classes=cfg.classes,
 		data=data,
 		fraction=cfg.fraction if mode == "train" else 1.0,
-		use_dali=getattr(cfg, "use_dali", False),
+		use_dali=use_dali,
 	)
 
 
@@ -183,6 +207,7 @@ def build_grounding(
 	max_samples: int = 80,
 ) -> Dataset:
 	"""Build and return a GroundingDataset based on configuration parameters."""
+	use_dali = getattr(cfg, "use_dali", False)
 	return GroundingDataset(
 		img_path=img_path,
 		json_file=json_file,
@@ -192,7 +217,7 @@ def build_grounding(
 		augment=mode == "train",
 		hyp=cfg,
 		rect=cfg.rect or rect,
-		cache=cfg.cache or None,
+		cache=None if use_dali else (cfg.cache or None),
 		single_cls=cfg.single_cls or False,
 		stride=stride,
 		pad=0.0 if mode == "train" else 0.5,
@@ -200,7 +225,7 @@ def build_grounding(
 		task=cfg.task,
 		classes=cfg.classes,
 		fraction=cfg.fraction if mode == "train" else 1.0,
-		use_dali=getattr(cfg, "use_dali", False),
+		use_dali=use_dali,
 	)
 
 
@@ -219,30 +244,15 @@ def build_dataloader(
 	batch = min(batch, len(dataset))
 	nd = torch.cuda.device_count()
 	nw = min(os.cpu_count() // max(nd, 1), workers)
-
 	use_dali = getattr(dataset, "use_dali", False)
-	if use_dali:
-		try:
-			from .dali_loader import DaliPrefetchLoader, dali_available
+	use_gpu_augment = bool(getattr(dataset, "gpu_augment", False))
 
-			if not dali_available():
-				LOGGER.warning("use_dali=True but nvidia-dali not importable, falling back to cv2 loader")
-				dataset.use_dali = False
-				dataset.set_image_provider(_Cv2ImageProvider(dataset.cv2_flag))
-			else:
-				LOGGER.info(colorstr("DALI: ") + f"prefetch-only helper enabled (batch={batch}, imgsz={dataset.imgsz})")
-				return DaliPrefetchLoader(
-					dataset=dataset,
-					batch_size=batch,
-					shuffle=shuffle,
-					rank=rank,
-					drop_last=drop_last and len(dataset) % batch != 0,
-					num_threads=max(2, nw // 2) if nw > 0 else 4,
-				)
-		except Exception as e:
-			LOGGER.warning(f"DALI prefetch loader init failed: {e}. Falling back to cv2 loader.")
-			dataset.use_dali = False
-			dataset.set_image_provider(_Cv2ImageProvider(dataset.cv2_flag))
+	if use_dali:
+		if use_gpu_augment and nw > 0:
+			LOGGER.warning(colorstr("DALI: ") + "forcing workers=0 for GPU augmentation safety")
+			nw = 0
+		_attach_dali_provider(dataset, nw, batch)
+		LOGGER.info(colorstr("DALI: ") + f"forced decode backend enabled for dataset path (workers={nw}, batch={batch}, gpu_aug={use_gpu_augment})")
 
 	sampler = (
 		None
@@ -254,7 +264,7 @@ def build_dataloader(
 	generator = torch.Generator()
 	generator.manual_seed(6148914691236517205 + RANK)
 
-	return InfiniteDataLoader(
+	loader_kwargs = dict(
 		dataset=dataset,
 		batch_size=batch,
 		shuffle=shuffle and sampler is None,
@@ -267,6 +277,13 @@ def build_dataloader(
 		generator=generator,
 		drop_last=drop_last and len(dataset) % batch != 0,
 	)
+
+	if nw > 0:
+		loader_kwargs["persistent_workers"] = True
+		if use_dali:
+			loader_kwargs["multiprocessing_context"] = "spawn"
+
+	return InfiniteDataLoader(**loader_kwargs)
 
 
 def check_source(

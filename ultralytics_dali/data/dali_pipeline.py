@@ -5,7 +5,7 @@ from .profiler import PROFILE
 
 from typing import List, Tuple
 from collections import OrderedDict
-from threading import Lock
+from threading import RLock
 
 import cv2
 import numpy as np
@@ -154,6 +154,12 @@ class DaliBatchDecoder:
 
 
 class DaliImageProvider:
+	"""Lazy, worker-local DALI image provider.
+
+	The object is intentionally picklable so it can be shipped to spawned DataLoader workers.
+	Each worker lazily builds its own DALI decoders the first time it needs them.
+	"""
+
 	def __init__(self, channels: int = 3, device_id: int = 0, num_threads: int = 2, max_cached: int = 4096):
 		if not DALI_AVAILABLE:
 			raise ImportError("nvidia-dali not installed")
@@ -163,12 +169,39 @@ class DaliImageProvider:
 		self.max_cached = int(max_cached)
 		self._decoders = {}
 		self._cache = OrderedDict()
-		self._lock = Lock()
+		self._lock = RLock()
+
+	def __getstate__(self):
+		return {
+			"channels": self.channels,
+			"device_id": self.device_id,
+			"num_threads": self.num_threads,
+			"max_cached": self.max_cached,
+		}
+
+	def __setstate__(self, state):
+		self.channels = int(state["channels"])
+		self.device_id = int(state["device_id"])
+		self.num_threads = int(state["num_threads"])
+		self.max_cached = int(state["max_cached"])
+		self._decoders = {}
+		self._cache = OrderedDict()
+		self._lock = RLock()
+
+	@staticmethod
+	def _ensure_cuda_ready() -> None:
+		try:
+			import torch
+			if torch.cuda.is_available() and not torch.cuda.is_initialized():
+				torch.cuda.init()
+		except Exception:
+			pass
 
 	def _get_decoder(self, batch_size: int) -> DaliBatchDecoder:
 		bs = int(batch_size)
 		dec = self._decoders.get(bs)
 		if dec is None:
+			self._ensure_cuda_ready()
 			dec = DaliBatchDecoder(
 				batch_size=bs,
 				max_size=None,
@@ -187,13 +220,24 @@ class DaliImageProvider:
 		if not indices:
 			return
 
-		imgs, _ = self._get_decoder(len(paths)).run(paths)
+		missing_indices = []
+		missing_paths = []
+		with self._lock:
+			for idx, path in zip(indices, paths):
+				key = int(idx)
+				if key not in self._cache:
+					missing_indices.append(key)
+					missing_paths.append(path)
+
+		if not missing_indices:
+			return
+
+		imgs, _ = self._get_decoder(len(missing_paths)).run(missing_paths)
 
 		with self._lock:
-			for idx, img in zip(indices, imgs):
-				key = int(idx)
-				self._cache[key] = np.ascontiguousarray(img)
-				self._cache.move_to_end(key)
+			for idx, img in zip(missing_indices, imgs):
+				self._cache[idx] = np.ascontiguousarray(img)
+				self._cache.move_to_end(idx)
 
 			while len(self._cache) > self.max_cached:
 				self._cache.popitem(last=False)

@@ -2384,6 +2384,466 @@ class RandomLoadText:
         return labels
 
 
+
+
+def _gpu_aug_enabled(dataset) -> bool:
+    try:
+        return bool(getattr(dataset, "gpu_augment", False) and torch.cuda.is_available())
+    except Exception:
+        return False
+
+
+def _gpu_default_device() -> torch.device:
+    idx = torch.cuda.current_device() if torch.cuda.is_available() else 0
+    return torch.device("cuda", idx)
+
+
+def _gpu_as_hwc_uint8(img, device: torch.device | None = None):
+    if device is None:
+        device = _gpu_default_device()
+    if isinstance(img, torch.Tensor):
+        out = img
+        if out.ndim != 3:
+            raise ValueError(f"Expected 3D image tensor, got shape={tuple(out.shape)}")
+        if out.shape[0] in {1, 3} and out.shape[-1] not in {1, 3}:
+            out = out.permute(1, 2, 0)
+        if out.dtype != torch.uint8:
+            out = out.clamp(0, 255).to(torch.uint8)
+        return out.to(device=device, non_blocking=False).contiguous()
+    arr = np.asarray(img)
+    if arr.ndim == 2:
+        arr = arr[..., None]
+    return torch.as_tensor(np.ascontiguousarray(arr), device=device, dtype=torch.uint8)
+
+
+def _gpu_to_numpy_hwc(img):
+    if isinstance(img, torch.Tensor):
+        out = img
+        if out.ndim == 3 and out.shape[0] in {1, 3} and out.shape[-1] not in {1, 3}:
+            out = out.permute(1, 2, 0)
+        return out.detach().to("cpu").contiguous().numpy()
+    return np.asarray(img)
+
+
+def _gpu_resize_hwc(img: torch.Tensor, size_hw: tuple[int, int]) -> torch.Tensor:
+    chw = img.permute(2, 0, 1).unsqueeze(0).float()
+    out = F.interpolate(chw, size=size_hw, mode="bilinear", align_corners=False)
+    out = out.squeeze(0).permute(1, 2, 0).clamp(0, 255).to(torch.uint8)
+    return out.contiguous()
+
+
+def _gpu_letterbox_hwc(img, new_shape=(640, 640), color=114, scaleup=True, stride=32):
+    if isinstance(new_shape, int):
+        new_shape = (new_shape, new_shape)
+    t = _gpu_as_hwc_uint8(img)
+    h, w = int(t.shape[0]), int(t.shape[1])
+    r = min(new_shape[0] / h, new_shape[1] / w)
+    if not scaleup:
+        r = min(r, 1.0)
+    new_unpad = (int(round(w * r)), int(round(h * r)))
+    dw = new_shape[1] - new_unpad[0]
+    dh = new_shape[0] - new_unpad[1]
+    if stride:
+        dw %= stride
+        dh %= stride
+    dw /= 2
+    dh /= 2
+    if (w, h) != new_unpad:
+        t = _gpu_resize_hwc(t, (new_unpad[1], new_unpad[0]))
+    top = int(round(dh - 0.1))
+    bottom = int(round(dh + 0.1))
+    left = int(round(dw - 0.1))
+    right = int(round(dw + 0.1))
+    chw = t.permute(2, 0, 1).float()
+    chw = F.pad(chw, (left, right, top, bottom), value=float(color))
+    return chw.permute(1, 2, 0).clamp(0, 255).to(torch.uint8).contiguous(), r, (dw, dh)
+
+
+def _rgb_to_hsv_torch(rgb: torch.Tensor) -> torch.Tensor:
+    r, g, b = rgb.unbind(-1)
+    maxc = rgb.max(-1).values
+    minc = rgb.min(-1).values
+    deltac = maxc - minc
+    v = maxc
+    s = torch.where(maxc > 0, deltac / torch.clamp(maxc, min=1e-6), torch.zeros_like(maxc))
+    h = torch.zeros_like(maxc)
+    mask = deltac > 1e-6
+    rc = (maxc - r) / torch.clamp(deltac, min=1e-6)
+    gc = (maxc - g) / torch.clamp(deltac, min=1e-6)
+    bc = (maxc - b) / torch.clamp(deltac, min=1e-6)
+    h = torch.where(mask & (r == maxc), (bc - gc) / 6.0, h)
+    h = torch.where(mask & (g == maxc), (2.0 + rc - bc) / 6.0, h)
+    h = torch.where(mask & (b == maxc), (4.0 + gc - rc) / 6.0, h)
+    h = torch.remainder(h, 1.0)
+    return torch.stack((h, s, v), dim=-1)
+
+
+def _hsv_to_rgb_torch(hsv: torch.Tensor) -> torch.Tensor:
+    h, s, v = hsv.unbind(-1)
+    h = torch.remainder(h, 1.0) * 6.0
+    i = torch.floor(h).to(torch.int64)
+    f = h - i.float()
+    p = v * (1.0 - s)
+    q = v * (1.0 - s * f)
+    t = v * (1.0 - s * (1.0 - f))
+    i = i % 6
+    shape = h.shape + (3,)
+    out = torch.empty(shape, device=hsv.device, dtype=hsv.dtype)
+    conds = [i == k for k in range(6)]
+    vals = [
+        torch.stack((v, t, p), dim=-1),
+        torch.stack((q, v, p), dim=-1),
+        torch.stack((p, v, t), dim=-1),
+        torch.stack((p, q, v), dim=-1),
+        torch.stack((t, p, v), dim=-1),
+        torch.stack((v, p, q), dim=-1),
+    ]
+    for c, val in zip(conds, vals):
+        out[c] = val[c]
+    return out
+
+
+def _bgr_hsv_jitter_torch(img: torch.Tensor, hgain: float, sgain: float, vgain: float) -> torch.Tensor:
+    if img.shape[-1] != 3:
+        return img
+    rgb = img[..., [2, 1, 0]].float() / 255.0
+    hsv = _rgb_to_hsv_torch(rgb)
+    gains = torch.empty(3, device=img.device).uniform_(-1.0, 1.0)
+    hsv[..., 0] = torch.remainder(hsv[..., 0] + gains[0] * hgain, 1.0)
+    hsv[..., 1] = torch.clamp(hsv[..., 1] * (1.0 + gains[1] * sgain), 0.0, 1.0)
+    hsv[..., 2] = torch.clamp(hsv[..., 2] * (1.0 + gains[2] * vgain), 0.0, 1.0)
+    rgb = _hsv_to_rgb_torch(hsv)
+    bgr = rgb[..., [2, 1, 0]]
+    return (bgr * 255.0).round().clamp(0, 255).to(torch.uint8).contiguous()
+
+
+class GpuMosaic(Mosaic):
+    def __init__(self, dataset, imgsz: int = 640, p: float = 1.0, n: int = 4):
+        super().__init__(dataset, imgsz=imgsz, p=p, n=n)
+        self.device = _gpu_default_device()
+
+    def _mosaic3(self, labels: dict[str, Any]) -> dict[str, Any]:
+        mosaic_labels = []
+        s = self.imgsz
+        for i in range(3):
+            labels_patch = labels if i == 0 else labels["mix_labels"][i - 1]
+            img = _gpu_as_hwc_uint8(labels_patch["img"], self.device)
+            h, w = labels_patch.pop("resized_shape")
+            if i == 0:
+                img3 = torch.full((s * 3, s * 3, img.shape[2]), 114, dtype=torch.uint8, device=self.device)
+                h0, w0 = h, w
+                c = s, s, s + w, s + h
+            elif i == 1:
+                c = s + w0, s, s + w0 + w, s + h
+            else:
+                c = s - w, s + h0 - h, s, s + h0
+            padw, padh = c[:2]
+            x1, y1, x2, y2 = (max(x, 0) for x in c)
+            img3[y1:y2, x1:x2] = img[y1 - padh :, x1 - padw :]
+            labels_patch = self._update_labels(labels_patch, padw + self.border[0], padh + self.border[1])
+            mosaic_labels.append(labels_patch)
+        final_labels = self._cat_labels(mosaic_labels)
+        final_labels["img"] = img3[-self.border[0] : self.border[0], -self.border[1] : self.border[1]].contiguous()
+        return final_labels
+
+    def _mosaic4(self, labels: dict[str, Any]) -> dict[str, Any]:
+        mosaic_labels = []
+        s = self.imgsz
+        yc, xc = (int(random.uniform(-x, 2 * s + x)) for x in self.border)
+        for i in range(4):
+            labels_patch = labels if i == 0 else labels["mix_labels"][i - 1]
+            img = _gpu_as_hwc_uint8(labels_patch["img"], self.device)
+            h, w = labels_patch.pop("resized_shape")
+            if i == 0:
+                img4 = torch.full((s * 2, s * 2, img.shape[2]), 114, dtype=torch.uint8, device=self.device)
+                x1a, y1a, x2a, y2a = max(xc - w, 0), max(yc - h, 0), xc, yc
+                x1b, y1b, x2b, y2b = w - (x2a - x1a), h - (y2a - y1a), w, h
+            elif i == 1:
+                x1a, y1a, x2a, y2a = xc, max(yc - h, 0), min(xc + w, s * 2), yc
+                x1b, y1b, x2b, y2b = 0, h - (y2a - y1a), min(w, x2a - x1a), h
+            elif i == 2:
+                x1a, y1a, x2a, y2a = max(xc - w, 0), yc, xc, min(s * 2, yc + h)
+                x1b, y1b, x2b, y2b = w - (x2a - x1a), 0, w, min(y2a - y1a, h)
+            else:
+                x1a, y1a, x2a, y2a = xc, yc, min(xc + w, s * 2), min(s * 2, yc + h)
+                x1b, y1b, x2b, y2b = 0, 0, min(w, x2a - x1a), min(y2a - y1a, h)
+            img4[y1a:y2a, x1a:x2a] = img[y1b:y2b, x1b:x2b]
+            padw = x1a - x1b
+            padh = y1a - y1b
+            labels_patch = self._update_labels(labels_patch, padw, padh)
+            mosaic_labels.append(labels_patch)
+        final_labels = self._cat_labels(mosaic_labels)
+        final_labels["img"] = img4.contiguous()
+        return final_labels
+
+    def _mosaic9(self, labels: dict[str, Any]) -> dict[str, Any]:
+        mosaic_labels = []
+        s = self.imgsz
+        hp, wp = -1, -1
+        for i in range(9):
+            labels_patch = labels if i == 0 else labels["mix_labels"][i - 1]
+            img = _gpu_as_hwc_uint8(labels_patch["img"], self.device)
+            h, w = labels_patch.pop("resized_shape")
+            if i == 0:
+                img9 = torch.full((s * 3, s * 3, img.shape[2]), 114, dtype=torch.uint8, device=self.device)
+                h0, w0 = h, w
+                c = s, s, s + w, s + h
+            elif i == 1:
+                c = s, s - h, s + w, s
+            elif i == 2:
+                c = s + wp, s - h, s + wp + w, s
+            elif i == 3:
+                c = s + w0, s, s + w0 + w, s + h
+            elif i == 4:
+                c = s + w0, s + hp, s + w0 + w, s + hp + h
+            elif i == 5:
+                c = s + w0 - w, s + h0, s + w0, s + h0 + h
+            elif i == 6:
+                c = s + w0 - wp - w, s + h0, s + w0 - wp, s + h0 + h
+            elif i == 7:
+                c = s - w, s + h0 - h, s, s + h0
+            else:
+                c = s - w, s + h0 - hp - h, s, s + h0 - hp
+            padw, padh = c[:2]
+            x1, y1, x2, y2 = (max(x, 0) for x in c)
+            img9[y1:y2, x1:x2] = img[y1 - padh :, x1 - padw :]
+            hp, wp = h, w
+            labels_patch = self._update_labels(labels_patch, padw + self.border[0], padh + self.border[1])
+            mosaic_labels.append(labels_patch)
+        final_labels = self._cat_labels(mosaic_labels)
+        final_labels["img"] = img9[-self.border[0] : self.border[0], -self.border[1] : self.border[1]].contiguous()
+        return final_labels
+
+
+class GpuRandomPerspective(RandomPerspective):
+    def affine_transform(self, img, border: tuple[int, int]):
+        if not isinstance(img, torch.Tensor):
+            return super().affine_transform(img, border)
+        if self.perspective:
+            cpu_img = _gpu_to_numpy_hwc(img)
+            out, M, s = super().affine_transform(cpu_img, border)
+            return _gpu_as_hwc_uint8(out, img.device), M, s
+        C = np.eye(3, dtype=np.float32)
+        C[0, 2] = -img.shape[1] / 2
+        C[1, 2] = -img.shape[0] / 2
+        P = np.eye(3, dtype=np.float32)
+        R = np.eye(3, dtype=np.float32)
+        a = random.uniform(-self.degrees, self.degrees)
+        s = random.uniform(1 - self.scale, 1 + self.scale)
+        R[:2] = cv2.getRotationMatrix2D(angle=a, center=(0, 0), scale=s)
+        S = np.eye(3, dtype=np.float32)
+        S[0, 1] = math.tan(random.uniform(-self.shear, self.shear) * math.pi / 180)
+        S[1, 0] = math.tan(random.uniform(-self.shear, self.shear) * math.pi / 180)
+        T = np.eye(3, dtype=np.float32)
+        T[0, 2] = random.uniform(0.5 - self.translate, 0.5 + self.translate) * self.size[0]
+        T[1, 2] = random.uniform(0.5 - self.translate, 0.5 + self.translate) * self.size[1]
+        M = T @ S @ R @ P @ C
+        if (border[0] != 0) or (border[1] != 0) or (M != np.eye(3)).any():
+            theta = torch.tensor(M[:2], dtype=torch.float32, device=img.device).unsqueeze(0)
+            chw = img.permute(2, 0, 1).unsqueeze(0).float() / 255.0
+            grid = F.affine_grid(theta, size=(1, chw.shape[1], self.size[1], self.size[0]), align_corners=False)
+            out = F.grid_sample(chw, grid, mode="bilinear", padding_mode="zeros", align_corners=False)
+            out = out.squeeze(0).permute(1, 2, 0)
+            if img.shape[2] == 3:
+                mask = (out.sum(dim=-1, keepdim=True) == 0)
+                out = out * (~mask) + mask * 114.0 / 255.0
+            img = (out * 255.0).round().clamp(0, 255).to(torch.uint8).contiguous()
+        return img, M, s
+
+
+class GpuMixUp(MixUp):
+    def _mix_transform(self, labels: dict[str, Any]) -> dict[str, Any]:
+        r = np.random.beta(32.0, 32.0)
+        labels2 = labels["mix_labels"][0]
+        img1 = _gpu_as_hwc_uint8(labels["img"])
+        img2 = _gpu_as_hwc_uint8(labels2["img"], img1.device)
+        mixed = img1.float() * r + img2.float() * (1.0 - r)
+        labels["img"] = mixed.round().clamp(0, 255).to(torch.uint8).contiguous()
+        labels["instances"] = Instances.concatenate([labels["instances"], labels2["instances"]], axis=0)
+        labels["cls"] = np.concatenate([labels["cls"], labels2["cls"]], 0)
+        return labels
+
+
+class GpuCutMix(CutMix):
+    def _mix_transform(self, labels: dict[str, Any]) -> dict[str, Any]:
+        h, w = labels["img"].shape[:2]
+        cut_areas = np.asarray([self._rand_bbox(w, h) for _ in range(self.num_areas)], dtype=np.float32)
+        ioa1 = bbox_ioa(cut_areas, labels["instances"].bboxes)
+        idx = np.nonzero(ioa1.sum(axis=1) <= 0)[0]
+        if len(idx) == 0:
+            return labels
+        labels2 = labels.pop("mix_labels")[0]
+        area = cut_areas[np.random.choice(idx)]
+        ioa2 = bbox_ioa(area[None], labels2["instances"].bboxes).squeeze(0)
+        indexes2 = np.nonzero(ioa2 >= (0.01 if len(labels["instances"].segments) else 0.1))[0]
+        if len(indexes2) == 0:
+            return labels
+        instances2 = labels2["instances"][indexes2]
+        instances2.convert_bbox("xyxy")
+        instances2.denormalize(w, h)
+        img1 = _gpu_as_hwc_uint8(labels["img"])
+        img2 = _gpu_as_hwc_uint8(labels2["img"], img1.device)
+        x1, y1, x2, y2 = area.astype(np.int32)
+        img1[y1:y2, x1:x2] = img2[y1:y2, x1:x2]
+        instances2.add_padding(-x1, -y1)
+        instances2.clip(x2 - x1, y2 - y1)
+        instances2.add_padding(x1, y1)
+        labels["img"] = img1.contiguous()
+        labels["cls"] = np.concatenate([labels["cls"], labels2["cls"][indexes2]], axis=0)
+        labels["instances"] = Instances.concatenate([labels["instances"], instances2], axis=0)
+        return labels
+
+
+class GpuCopyPaste(CopyPaste):
+    def _transform(self, labels1: dict[str, Any], labels2: dict[str, Any] = {}) -> dict[str, Any]:
+        im = _gpu_as_hwc_uint8(labels1["img"])
+        if "mosaic_border" not in labels1:
+            im = im.clone()
+        cls = labels1["cls"]
+        h, w = int(im.shape[0]), int(im.shape[1])
+        instances = labels1.pop("instances")
+        instances.convert_bbox(format="xyxy")
+        instances.denormalize(w, h)
+        im_new = np.zeros((h, w), np.uint8)
+        instances2 = labels2.pop("instances", None)
+        if instances2 is None:
+            instances2 = deepcopy(instances)
+            instances2.fliplr(w)
+        ioa = bbox_ioa(instances2.bboxes, instances.bboxes)
+        indexes = np.nonzero((ioa < 0.30).all(1))[0]
+        n = len(indexes)
+        sorted_idx = np.argsort(ioa.max(1)[indexes])
+        indexes = indexes[sorted_idx]
+        for j in indexes[: round(self.p * n)]:
+            cls = np.concatenate((cls, labels2.get("cls", cls)[[j]]), axis=0)
+            instances = Instances.concatenate((instances, instances2[[j]]), axis=0)
+            cv2.drawContours(im_new, instances2.segments[[j]].astype(np.int32), -1, 1, cv2.FILLED)
+        if "img" in labels2:
+            result = _gpu_as_hwc_uint8(labels2["img"], im.device)
+        else:
+            result = torch.flip(im, dims=[1])
+        mask = torch.as_tensor(im_new.astype(bool), device=im.device)
+        im[mask] = result[mask]
+        labels1["img"] = im.contiguous()
+        labels1["cls"] = cls
+        labels1["instances"] = instances
+        return labels1
+
+
+class GpuAlbumentations(Albumentations):
+    def __call__(self, labels: dict[str, Any]) -> dict[str, Any]:
+        img = labels.get("img")
+        if not isinstance(img, torch.Tensor):
+            return super().__call__(labels)
+        if self.transform is None or random.random() > self.p:
+            return labels
+        np_img = _gpu_to_numpy_hwc(img)
+        labels_cpu = dict(labels)
+        labels_cpu["img"] = np_img
+        labels_cpu = super().__call__(labels_cpu)
+        labels_cpu["img"] = _gpu_as_hwc_uint8(labels_cpu["img"], img.device)
+        return labels_cpu
+
+
+class GpuRandomHSV(RandomHSV):
+    def __call__(self, labels: dict[str, Any]) -> dict[str, Any]:
+        img = labels["img"]
+        if not isinstance(img, torch.Tensor):
+            return super().__call__(labels)
+        if img.shape[-1] != 3:
+            return labels
+        if self.hgain or self.sgain or self.vgain:
+            labels["img"] = _bgr_hsv_jitter_torch(img, self.hgain, self.sgain, self.vgain)
+        return labels
+
+
+class GpuRandomFlip(RandomFlip):
+    def __call__(self, labels: dict[str, Any]) -> dict[str, Any]:
+        img = labels["img"]
+        if not isinstance(img, torch.Tensor):
+            return super().__call__(labels)
+        instances = labels.pop("instances")
+        instances.convert_bbox(format="xywh")
+        h, w = img.shape[:2]
+        h = 1 if instances.normalized else h
+        w = 1 if instances.normalized else w
+        if self.direction == "vertical" and random.random() < self.p:
+            img = torch.flip(img, dims=[0])
+            instances.flipud(h)
+            if self.flip_idx is not None and instances.keypoints is not None:
+                instances.keypoints = np.ascontiguousarray(instances.keypoints[:, self.flip_idx, :])
+        if self.direction == "horizontal" and random.random() < self.p:
+            img = torch.flip(img, dims=[1])
+            instances.fliplr(w)
+            if self.flip_idx is not None and instances.keypoints is not None:
+                instances.keypoints = np.ascontiguousarray(instances.keypoints[:, self.flip_idx, :])
+        labels["img"] = img.contiguous()
+        labels["instances"] = instances
+        return labels
+
+
+class GpuLetterBox(LetterBox):
+    def __call__(self, labels=None, image=None):
+        if labels is None:
+            return image
+        img = labels.get("img") if isinstance(labels, dict) else labels
+        if not isinstance(img, torch.Tensor):
+            return super().__call__(labels=labels, image=image)
+        out, ratio, (dw, dh) = _gpu_letterbox_hwc(
+            img,
+            new_shape=self.new_shape,
+            color=self.color[0] if isinstance(self.color, tuple) else self.color,
+            scaleup=self.scaleup,
+            stride=self.stride,
+        )
+        if not isinstance(labels, dict):
+            return out
+        labels["img"] = out
+        labels["resized_shape"] = out.shape[:2]
+        if labels.get("ratio_pad"):
+            labels["ratio_pad"] = (labels["ratio_pad"], (dw, dh))
+        if "instances" in labels:
+            labels = self._update_labels(labels, ratio, dw, dh)
+        return labels
+
+
+class GpuFormat(Format):
+    def __init__(self, *args, device: str | torch.device = "cuda", output_cpu: bool = False, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.device = torch.device(device) if isinstance(device, str) else device
+        self.output_cpu = output_cpu
+
+    def __call__(self, labels: dict[str, Any]) -> dict[str, Any]:
+        out = super().__call__(labels)
+        if isinstance(out["img"], torch.Tensor):
+            device = self.device if torch.cuda.is_available() else out["img"].device
+        else:
+            device = self.device if torch.cuda.is_available() else torch.device("cpu")
+        for k in ("img", "cls", "bboxes", "batch_idx", "masks", "sem_masks", "keypoints", "obb"):
+            v = out.get(k)
+            if isinstance(v, torch.Tensor):
+                out[k] = v.to(device=device, non_blocking=False)
+        if self.output_cpu:
+            for k, v in list(out.items()):
+                if isinstance(v, torch.Tensor):
+                    out[k] = v.cpu()
+        return out
+
+    def _format_img(self, img) -> torch.Tensor:
+        if isinstance(img, torch.Tensor):
+            t = img
+            if t.ndim == 2:
+                t = t[..., None]
+            if t.ndim == 3 and t.shape[0] in {1, 3} and t.shape[-1] not in {1, 3}:
+                chw = t.contiguous()
+            else:
+                chw = t.permute(2, 0, 1).contiguous()
+            if chw.shape[0] == 3 and random.uniform(0, 1) > self.bgr:
+                chw = chw[[2, 1, 0]]
+            return chw
+        return super()._format_img(img)
+
+
 def v8_transforms(dataset, imgsz: int, hyp: IterableSimpleNamespace, stretch: bool = False):
     """Apply a series of image transformations for training.
 

@@ -23,6 +23,8 @@ from ultralytics.utils.torch_utils import TORCHVISION_0_18
 from .augment import (
 	Compose,
 	Format,
+	GpuFormat,
+	GpuLetterBox,
 	LetterBox,
 	RandomLoadText,
 	classify_augmentations,
@@ -54,7 +56,12 @@ class YOLODataset(BaseDataset):
 		self.use_keypoints = task == "pose"
 		self.use_obb = task == "obb"
 		self.data = data
+		self.gpu_augment = bool(use_dali and torch.cuda.is_available())
 		assert not (self.use_segments and self.use_keypoints), "Can not use both segments and keypoints."
+		if self.use_dali and kwargs.get("cache"):
+			LOGGER.info(colorstr("DALI: ") + "disabling dataset cache during init to keep DALI as the active decode backend")
+			kwargs = dict(kwargs)
+			kwargs["cache"] = None
 		super().__init__(*args, channels=self.data.get("channels", 3), **kwargs)
 
 	def cache_labels(self, path: Path = Path("./labels.cache")) -> dict:
@@ -156,15 +163,18 @@ class YOLODataset(BaseDataset):
 		return labels
 
 	def build_transforms(self, hyp: dict | None = None) -> Compose:
+		use_gpu = bool(getattr(self, "gpu_augment", False))
+		format_cls = GpuFormat if use_gpu else Format
+		letterbox_cls = GpuLetterBox if use_gpu else LetterBox
 		if self.augment:
 			hyp.mosaic = hyp.mosaic if self.augment and not self.rect else 0.0
 			hyp.mixup = hyp.mixup if self.augment and not self.rect else 0.0
 			hyp.cutmix = hyp.cutmix if self.augment and not self.rect else 0.0
 			transforms = v8_transforms(self, self.imgsz, hyp)
 		else:
-			transforms = Compose([LetterBox(new_shape=(self.imgsz, self.imgsz), scaleup=False)])
+			transforms = Compose([letterbox_cls(new_shape=(self.imgsz, self.imgsz), scaleup=False)])
 		transforms.append(
-			Format(
+			format_cls(
 				bbox_format="xywh",
 				normalize=True,
 				return_mask=self.use_segments,
@@ -174,6 +184,8 @@ class YOLODataset(BaseDataset):
 				mask_ratio=hyp.mask_ratio,
 				mask_overlap=hyp.overlap_mask,
 				bgr=hyp.bgr if self.augment else 0.0,
+				device="cuda",
+				output_cpu=False,
 			)
 		)
 		return transforms

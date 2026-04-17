@@ -1,0 +1,92 @@
+tasks:
+  - name: detect
+    kind: yolo
+    task: detect
+    model: yolov8n.pt
+    data: data/detect.yaml
+    img_path: data/images/train
+    batch: 16
+    imgsz: 640
+    mode: train
+    rect: false
+    stride: 32
+    workers: 4
+    cfg_overrides: {}
+    train_overrides: {}
+
+  - name: segment
+    kind: yolo
+    task: segment
+    model: yolov8n-seg.pt
+    data: data/segment.yaml
+    img_path: data/images/train
+    batch: 16
+    imgsz: 640
+    mode: train
+    rect: false
+    stride: 32
+    workers: 4
+    cfg_overrides: {}
+    train_overrides: {}
+
+  - name: pose
+    kind: yolo
+    task: pose
+    model: yolov8n-pose.pt
+    data: data/pose.yaml
+    img_path: data/images/train
+    batch: 16
+    imgsz: 640
+    mode: train
+    rect: false
+    stride: 32
+    workers: 4
+    cfg_overrides: {}
+    train_overrides: {}
+
+  - name: obb
+    kind: yolo
+    task: obb
+    model: yolov8n-obb.pt
+    data: data/obb.yaml
+    img_path: data/images/train
+    batch: 16
+    imgsz: 640
+    mode: train
+    rect: false
+    stride: 32
+    workers: 4
+    cfg_overrides: {}
+    train_overrides: {}
+
+  - name: multimodal
+    kind: yolo
+    task: detect
+    multi_modal: true
+    model: yolov8n.pt
+    data: data/multimodal.yaml
+    img_path: data/images/train
+    batch: 16
+    imgsz: 640
+    mode: train
+    rect: false
+    stride: 32
+    workers: 4
+    cfg_overrides: {}
+    train_overrides: {}
+
+  - name: grounding
+    kind: grounding
+    task: detect
+    model: yolov8n.pt
+    data: data/grounding.yaml
+    img_path: data/images/train
+    json_file: data/grounding_train.json
+    batch: 16
+    imgsz: 640
+    mode: train
+    rect: false
+    stride: 32
+    workers: 4
+    cfg_overrides: {}
+    train_overrides: {}

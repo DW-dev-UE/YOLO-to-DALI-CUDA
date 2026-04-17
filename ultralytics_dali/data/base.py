@@ -306,6 +306,21 @@ class BaseDataset(Dataset):
 				item = self.transforms(item)
 			return item
 
+	def __getitems__(self, indices: list[int]) -> list[dict[str, Any]]:
+		"""Batch-aware sample fetch used by PyTorch auto-collation."""
+		if not indices:
+			return []
+
+		provider = getattr(self, "image_provider", None)
+		if getattr(self, "use_dali", False) and provider is not None and hasattr(provider, "prime"):
+			missing = [i for i in indices if self.ims[i] is None]
+			if missing:
+				with PROFILE.measure("base.__getitems__.prime"):
+					provider.prime(missing, [self.im_files[i] for i in missing])
+
+		with PROFILE.measure("base.__getitems__.loop"):
+			return [self.__getitem__(index) for index in indices]
+
 	def get_image_and_label(self, index: int) -> dict[str, Any]:
 		with PROFILE.measure("base.get_image_and_label.total"):
 			label = deepcopy(self.labels[index])
