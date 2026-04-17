@@ -163,18 +163,24 @@ class YOLODataset(BaseDataset):
 		return labels
 
 	def build_transforms(self, hyp: dict | None = None) -> Compose:
-		use_gpu = bool(getattr(self, "gpu_augment", False))
-		format_cls = GpuFormat if use_gpu else Format
-		letterbox_cls = GpuLetterBox if use_gpu else LetterBox
+		"""Build and append transforms to the list.
+
+		Args:
+			hyp (dict, optional): Hyperparameters for transforms.
+
+		Returns:
+			(Compose): Composed transforms.
+		"""
 		if self.augment:
 			hyp.mosaic = hyp.mosaic if self.augment and not self.rect else 0.0
 			hyp.mixup = hyp.mixup if self.augment and not self.rect else 0.0
 			hyp.cutmix = hyp.cutmix if self.augment and not self.rect else 0.0
 			transforms = v8_transforms(self, self.imgsz, hyp)
 		else:
-			transforms = Compose([letterbox_cls(new_shape=(self.imgsz, self.imgsz), scaleup=False)])
+			transforms = Compose([LetterBox(new_shape=(self.imgsz, self.imgsz), scaleup=False)])
+
 		transforms.append(
-			format_cls(
+			Format(
 				bbox_format="xywh",
 				normalize=True,
 				return_mask=self.use_segments,
@@ -184,13 +190,16 @@ class YOLODataset(BaseDataset):
 				mask_ratio=hyp.mask_ratio,
 				mask_overlap=hyp.overlap_mask,
 				bgr=hyp.bgr if self.augment else 0.0,
-				device="cuda",
-				output_cpu=False,
 			)
 		)
 		return transforms
 
 	def close_mosaic(self, hyp: dict) -> None:
+		"""Disable mosaic, copy_paste, mixup and cutmix augmentations by setting their probabilities to 0.0.
+
+		Args:
+			hyp (dict): Hyperparameters for transforms.
+		"""
 		hyp.mosaic = 0.0
 		hyp.copy_paste = 0.0
 		hyp.mixup = 0.0
@@ -248,9 +257,19 @@ class YOLOMultiModalDataset(YOLODataset):
 		return labels
 
 	def build_transforms(self, hyp: dict | None = None) -> Compose:
+		"""Enhance data transformations with optional text augmentation for multi-modal training.
+
+		Args:
+			hyp (dict, optional): Hyperparameters for transforms.
+
+		Returns:
+			(Compose): Composed transforms including text augmentation if applicable.
+		"""
 		transforms = super().build_transforms(hyp)
 		if self.augment:
-			transforms.insert(-1, RandomLoadText(max_samples=min(self.data.get("nc", 80), 80), padding=True, padding_value=""))
+			transforms.insert(
+				-1, RandomLoadText(max_samples=min(self.data.get("nc", 80), 80), padding=True, padding_value="")
+			)
 		return transforms
 
 
