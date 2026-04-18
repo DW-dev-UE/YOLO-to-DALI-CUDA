@@ -268,7 +268,7 @@ class YOLOMultiModalDataset(YOLODataset):
 		transforms = super().build_transforms(hyp)
 		if self.augment:
 			transforms.insert(
-				-1, RandomLoadText(max_samples=min(self.data.get("nc", 80), 80), padding=True, padding_value="")
+				-1, RandomLoadText(max_samples=min(self.data.get("nc", 80), 80), padding=True, padding_value=[""])
 			)
 		return transforms
 

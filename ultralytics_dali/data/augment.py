@@ -2295,7 +2295,7 @@ class RandomLoadText:
         neg_samples: tuple[int, int] = (80, 80),
         max_samples: int = 80,
         padding: bool = False,
-        padding_value: list[str] = [""],
+        padding_value: list[str] | str | None = None,
     ) -> None:
         """Initialize the RandomLoadText class for randomly sampling positive and negative texts.
 
@@ -2316,6 +2316,14 @@ class RandomLoadText:
         self.neg_samples = neg_samples
         self.max_samples = max_samples
         self.padding = padding
+        if padding_value is None:
+            padding_value = [""]
+        elif isinstance(padding_value, str):
+            padding_value = [padding_value]
+        else:
+            padding_value = list(padding_value)
+        if not padding_value:
+            padding_value = [""]
         self.padding_value = padding_value
 
     def __call__(self, labels: dict[str, Any]) -> dict[str, Any]:
