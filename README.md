@@ -2,7 +2,7 @@
 
 **NVIDIA DALI accelerated data loading for Ultralytics YOLO**
 
-This is a DALI data loader designed specifically for Ultralytics YOLO that significantly reduces CPU load.
+Drop-in DALI data loader for Ultralytics YOLO that offloads image decoding to the GPU, cutting CPU load significantly.
 
 <p align="center">
   <img src="https://img.shields.io/badge/DALI-Accelerated-00A4EF" alt="DALI">
@@ -11,47 +11,49 @@ This is a DALI data loader designed specifically for Ultralytics YOLO that signi
 
 ---
 
-## 📌 Project Overview
+## What this is
 
-This is a GitHub open-source project developed to assist users who train YOLO models on images.  <br><br>
-The current YOLO implementation does not utilize NVIDIA’s CUDA DALI library, so image preprocessing is performed on the CPU. <br>This library was created to help users reduce CPU load.
+The default YOLO training pipeline decodes and preprocesses images entirely on the CPU via OpenCV. On GPU-heavy training rigs this becomes the bottleneck fast.
 
-🔊 **Important Notes**
-- This project is built upon Ultralytics’ open-source code.
-- Unauthorized sales or any actions that violate Ultralytics’ terms of use are strictly prohibited.
-- This library fully complies with Ultralytics’ license and terms of use.
-- In **WSL (Windows Subsystem for Linux)** environments, the DALI library cannot achieve its full performance.
+This library plugs NVIDIA DALI into the Ultralytics pipeline so that image decoding happens on the GPU instead. You flip one flag (`use_dali=True`) and everything else stays the same -- augmentations, collate, label parsing, task formatting all remain untouched.
 
----
-
-## ✨ Features
-
-- CUDA-based DALI pipeline for fast image preprocessing
-- Dramatically reduced CPU load
-- Full support for Ultralytics YOLOv8, YOLOv10, YOLOv11
-- Minimal code changes required (drop-in compatible)
-- High-performance data loading on NVIDIA GPUs
+**Heads up:**
+- Built on top of Ultralytics' open-source code. Unauthorized resale or any violation of Ultralytics' terms is prohibited.
+- This library fully complies with Ultralytics' license.
+- DALI won't hit full performance under **WSL** (Windows Subsystem for Linux).
 
 ---
 
-## 📊 Performance (Benchmarks)
+## Features
 
-We have conducted extensive performance benchmarks comparing the standard OpenCV (`cv2`) dataloader with the high-performance **NVIDIA DALI** backend across various vision tasks (Detection, OBB, Segmentation, Classification).
+- CUDA-based DALI pipeline for GPU image decoding
+- Significant CPU load reduction during training
+- Supports YOLOv8, YOLOv10, YOLOv11, YOLOv26
+- Minimal code changes -- just add `use_dali=True`
+- Automatic cv2 fallback if DALI fails on any batch
 
-For the full benchmark results, throughput analysis, and a deep dive into why DALI significantly accelerates certain tasks, please refer to our dedicated performance document:
+---
 
-**👉 [View the Detailed Performance Benchmark Report](performance.md)**
+## Benchmarks
 
-## 💡 Quick Start
+We benchmarked the standard cv2 dataloader against DALI across Detection, OBB, Segmentation, and Classification tasks.
 
-> INSTALL <br>
+Full results, throughput numbers, and analysis are in the dedicated report:
+
+**[View the Performance Benchmark Report](performance.md)**
+
+---
+
+## Quick Start
+
+### Install
 
 ```bash
 pip install nvidia-dali-cuda120
 pip install git+https://github.com/DW-dev-UE/YOLO-to-DALI-CUDA.git
 ```
 
-> CODE EXAMPLE
+### Usage
 
 ```py
 from ultralytics_dali import YOLO
@@ -72,74 +74,58 @@ model_pose.train(data="/path/to/pose.yaml", task="pose", epochs=10, imgsz=1024, 
 model_obb = YOLO("yolo26n-obb.pt")
 model_obb.train(data="/path/to/obb.yaml", task="obb", epochs=10, imgsz=1024, batch=16, device=0, workers=24, use_dali=True)
 
-# Classification (Pass the dataset root directory directly)
+# Classification (pass the dataset root directory directly)
 model_cls = YOLO("yolo11n-cls.pt")
 model_cls.train(data="/path/to/classification_root", task="classify", epochs=10, imgsz=1024, batch=16, device=0, workers=24, use_dali=True)
 ```
 
 ---
 
-# 🏗️ Architecture Modifications for NVIDIA DALI Integration
+## How it works
 
-This document outlines the specific architectural changes made to the Ultralytics YOLO pipeline to integrate NVIDIA DALI as a pluggable image decode/backend provider.
+### The core change
 
-## 1. The Core Modification: Image-Provider Seam
-The fundamental architectural change was refactoring `BaseDataset.load_image()` to support a pluggable image provider. This creates a "seam" in the existing pipeline.
+The key modification is in `BaseDataset.load_image()`. Instead of always calling cv2 to decode images, the dataset now checks for a pluggable image provider. If DALI is enabled, decoding routes through the DALI backend. If not, it falls back to cv2 as usual.
 
-Instead of hardcoding OpenCV (`cv2`) for decoding, the dataset can now dynamically switch between:
-* The **default `cv2` provider**
-* The **DALI-backed provider**
+This means all existing YOLO logic -- augmentations, collate functions, label parsing -- stays completely untouched. DALI only replaces the decode step.
 
-This ensures that the existing YOLO task semantics (augmentations, collate, label parsing) remain completely unchanged while allowing the underlying decode backend to be swapped out.
+### What was added
 
-## 2. New Architectural Components Added
+**DALI Image Provider** -- sits between the dataset and the decoder. Handles batch-aware decoding, manages the worker-local decoder lifecycle, caches decoded images for the current batch, and stays compatible with the existing dataset indexing.
 
-### A. DALI-Backed Image Provider
-A new image provider class was introduced to handle DALI-specific operations within the dataset pipeline.
-* **Responsibilities:** Batch-aware decoding.
-    * Worker-local decoder lifecycle management.
-    * Decoded image caching for the current batch.
-    * Maintaining compatibility with the existing dataset indexing path.
+**DALI Batch Decoder** -- uses DALI's `external_source` + mixed decode to decode raw image bytes on the GPU. If anything goes wrong (corrupt image, DALI error), it falls back to cv2 automatically so training doesn't crash.
 
-### B. DALI Batch Decoder
-A dedicated DALI batch decoder utilizing `external_source` and mixed decode was integrated.
-* **Input:** Raw image bytes.
-* **Output:** Decoded image tensors/arrays.
-* **Backend:** DALI mixed decode (GPU-accelerated).
-* **Fallback Mechanism:** Automatically falls back to standard `cv2` if the DALI extension fails or batch decoding encounters an error, ensuring robust pipeline execution.
+### How the flag propagates
 
-## 3. Dataloader Wiring & Propagation
+When you set `use_dali=True`:
 
-To seamlessly inject the new components into the training loop, the initialization pathways were modified:
+1. The dataloader builder picks up the flag and attaches the DALI provider to the dataset
+2. Cache behavior and worker handling get adjusted for DALI's requirements
+3. The flag propagates through all dataset builders, so it works consistently across `detect`, `segment`, `pose`, `obb`, and `grounding` tasks
 
-* **Dataloader Wiring:** The dataloader builder was updated to accept a `use_dali=True` configuration. When enabled, it attaches the DALI provider to the dataset, adjusts cache behavior, and aligns worker handling with DALI's requirements.
-* **Build Path Propagation:** The `use_dali` flag was propagated through all dataset builders. This allows the DALI architecture to be consistently enabled across various tasks (`detect`, `segment`, `pose`, `obb`, `multimodal`, `grounding`).
+### The pipeline flow
 
-## 4. The Resulting Architecture Flow
+```
+use_dali=True
+  -> build_yolo_dataset / build_grounding
+    -> dataset created with DALI flag
+      -> build_dataloader attaches DALI provider
+        -> load_image() delegates to DALI provider
+          -> DALI decodes on GPU
+            -> decoded images go back into standard YOLO pipeline
+```
 
-The current architecture is intentionally conservative, acting as a direct drop-in replacement for the image acquisition step. The execution flow is as follows:
+Everything after the decode step is identical to the default pipeline.
 
-1.  **Training Config:** User sets `use_dali=True`.
-2.  **Dataset Builder:** `build_yolo_dataset` or `build_grounding` is called.
-3.  **Dataset Creation:** The dataset is instantiated with the `use_dali` flag enabled.
-4.  **Dataloader Builder:** `build_dataloader` intercepts the setup.
-5.  **Provider Attachment:** The DALI Image Provider is attached to the dataset.
-6.  **Data Fetching:** During iteration, `dataset.load_image()` delegates the call to the DALI provider.
-7.  **GPU Decoding:** DALI decodes the image batch on the GPU.
-8.  **Pipeline Continuation:** The decoded images are passed back to the standard YOLO pipeline. **Existing YOLO transforms, collate functions, and task semantics continue unchanged.**
-
-> [!IMPORTANT]
-> **Architectural Boundary:** DALI currently accelerates **decode/backend only**. It does not replace YOLO's spatial/color augmentation semantics, collate semantics, label parsing, or task formatting logic.
+> **Note:** DALI currently accelerates decode only. It does not replace YOLO's augmentation logic, collate semantics, label parsing, or task-specific formatting.
 
 ---
 
-## 🙏 Acknowledgments
+## Acknowledgments
 
 - Ultralytics Team
 - NVIDIA DALI Team
 
-## 📜 License & Compliance
+## License
 
-This project is built upon Ultralytics’ open-source code.<br>
-Unauthorized sales and any violations of Ultralytics’ terms of use are strictly prohibited.<br>
-This library fully complies with Ultralytics’ license.
+Built on Ultralytics' open-source code. Unauthorized resale and any violation of Ultralytics' terms of use is strictly prohibited. This library fully complies with Ultralytics' license.
