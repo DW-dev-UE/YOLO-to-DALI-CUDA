@@ -79,6 +79,60 @@ model_cls.train(data="/path/to/classification_root", task="classify", epochs=10,
 
 ---
 
+# 🏗️ Architecture Modifications for NVIDIA DALI Integration
+
+This document outlines the specific architectural changes made to the Ultralytics YOLO pipeline to integrate NVIDIA DALI as a pluggable image decode/backend provider.
+
+## 1. The Core Modification: Image-Provider Seam
+The fundamental architectural change was refactoring `BaseDataset.load_image()` to support a pluggable image provider. This creates a "seam" in the existing pipeline.
+
+Instead of hardcoding OpenCV (`cv2`) for decoding, the dataset can now dynamically switch between:
+* The **default `cv2` provider**
+* The **DALI-backed provider**
+
+This ensures that the existing YOLO task semantics (augmentations, collate, label parsing) remain completely unchanged while allowing the underlying decode backend to be swapped out.
+
+## 2. New Architectural Components Added
+
+### A. DALI-Backed Image Provider
+A new image provider class was introduced to handle DALI-specific operations within the dataset pipeline.
+* **Responsibilities:** * Batch-aware decoding.
+    * Worker-local decoder lifecycle management.
+    * Decoded image caching for the current batch.
+    * Maintaining compatibility with the existing dataset indexing path.
+
+### B. DALI Batch Decoder
+A dedicated DALI batch decoder utilizing `external_source` and mixed decode was integrated.
+* **Input:** Raw image bytes.
+* **Output:** Decoded image tensors/arrays.
+* **Backend:** DALI mixed decode (GPU-accelerated).
+* **Fallback Mechanism:** Automatically falls back to standard `cv2` if the DALI extension fails or batch decoding encounters an error, ensuring robust pipeline execution.
+
+## 3. Dataloader Wiring & Propagation
+
+To seamlessly inject the new components into the training loop, the initialization pathways were modified:
+
+* **Dataloader Wiring:** The dataloader builder was updated to accept a `use_dali=True` configuration. When enabled, it attaches the DALI provider to the dataset, adjusts cache behavior, and aligns worker handling with DALI's requirements.
+* **Build Path Propagation:** The `use_dali` flag was propagated through all dataset builders. This allows the DALI architecture to be consistently enabled across various tasks (`detect`, `segment`, `pose`, `obb`, `multimodal`, `grounding`).
+
+## 4. The Resulting Architecture Flow
+
+The current architecture is intentionally conservative, acting as a direct drop-in replacement for the image acquisition step. The execution flow is as follows:
+
+1.  **Training Config:** User sets `use_dali=True`.
+2.  **Dataset Builder:** `build_yolo_dataset` or `build_grounding` is called.
+3.  **Dataset Creation:** The dataset is instantiated with the `use_dali` flag enabled.
+4.  **Dataloader Builder:** `build_dataloader` intercepts the setup.
+5.  **Provider Attachment:** The DALI Image Provider is attached to the dataset.
+6.  **Data Fetching:** During iteration, `dataset.load_image()` delegates the call to the DALI provider.
+7.  **GPU Decoding:** DALI decodes the image batch on the GPU.
+8.  **Pipeline Continuation:** The decoded images are passed back to the standard YOLO pipeline. **Existing YOLO transforms, collate functions, and task semantics continue unchanged.**
+
+> [!IMPORTANT]
+> **Architectural Boundary:** DALI currently accelerates **decode/backend only**. It does not replace YOLO's spatial/color augmentation semantics, collate semantics, label parsing, or task formatting logic.
+
+---
+
 ## 🙏 Acknowledgments
 
 - Ultralytics Team
