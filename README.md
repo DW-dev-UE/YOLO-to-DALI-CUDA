@@ -96,7 +96,7 @@ This ensures that the existing YOLO task semantics (augmentations, collate, labe
 
 ### A. DALI-Backed Image Provider
 A new image provider class was introduced to handle DALI-specific operations within the dataset pipeline.
-* **Responsibilities:** * Batch-aware decoding.
+* **Responsibilities:** Batch-aware decoding.
     * Worker-local decoder lifecycle management.
     * Decoded image caching for the current batch.
     * Maintaining compatibility with the existing dataset indexing path.
