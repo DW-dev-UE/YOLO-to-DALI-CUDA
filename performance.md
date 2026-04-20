@@ -15,10 +15,31 @@ All benchmarks were run on real-world image datasets:
 
 ---
 
+## Results at a Glance
+
+<p align="center">
+  <img src="assets/benchmark_epoch_time.svg" alt="Epoch Time Comparison" width="720"/>
+</p>
+
+<p align="center">
+  <img src="assets/benchmark_throughput.svg" alt="Throughput Comparison" width="720"/>
+</p>
+
+| Task | CV2 (s) | DALI (s) | Delta | Throughput (DALI / CV2) | Quality Guard |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| Detect | 200.05 | 182.83 | **-17.22 (8.6%)** | 147.48 / 147.21 img/s | Passed |
+| OBB | 96.08 | 92.71 | **-3.37 (3.5%)** | 104.79 / 97.32 img/s | Passed |
+| Segment | 70.57 | 70.00 | -0.56 (0.8%) | 44.46 / 44.41 img/s | Passed |
+| Classify | 80.50 | 79.40 | -1.10 (1.3%) | 12.67 / 11.76 img/s | Passed |
+
+All tasks passed the Quality Guard -- loss curves, mAP, and accuracy metrics matched the CV2 baseline exactly.
+
+---
+
 ## Key Takeaways
 
 - DALI consistently reduces total wall-clock time per epoch, with the biggest gains in Detection and OBB.
-- Model quality stays identical across all tasks -- loss curves, mAP, and accuracy metrics matched the CV2 baseline exactly (Quality Guard passed).
+- Model quality stays identical across all tasks. No metric degradation was observed.
 - In Segmentation, DALI does speed up the raw training phase, but disk I/O during save/validation masks the improvement. There's room for further optimization here.
 
 ---
@@ -30,17 +51,6 @@ The Detection task gained **-17.22s** per epoch, which stood out from the rest. 
 1. Detection pipelines rely heavily on spatial augmentations like Mosaic, MixUp, and geometric bbox transforms. These are expensive on the CPU.
 2. DALI moves all of that to the GPU, eliminating the CPU bottleneck entirely.
 3. With the CPU freed up, validation and model checkpoint saving also ran faster -- the speedup cascaded through the whole epoch.
-
----
-
-## Performance Summary (Total Epoch Time)
-
-| Task | CV2 (s) | DALI (s) | Delta | Throughput (DALI / CV2) | Status |
-| :--- | :---: | :---: | :---: | :---: | :---: |
-| Detect | 200.05 | 182.83 | -17.22 (8.6%) | 147.48 / 147.21 img/s | Passed |
-| OBB | 96.08 | 92.71 | -3.37 (3.5%) | 104.79 / 97.32 img/s | Passed |
-| Segment | 70.57 | 70.00 | -0.56 (0.8%) | 44.46 / 44.41 img/s | Passed |
-| Classify | 80.50 | 79.40 | -1.10 (1.3%) | 12.67 / 11.76 img/s | Passed |
 
 ---
 
