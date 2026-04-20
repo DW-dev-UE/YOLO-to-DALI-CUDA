@@ -1,62 +1,67 @@
 # Performance Benchmark: NVIDIA DALI vs Standard CV2 Dataloader
 
-This repository contains the performance benchmark results for the **`ultralytics_dali`** package. It compares the processing speed and overall epoch completion times between the standard OpenCV (cv2) dataloader and the high-performance **NVIDIA DALI** backend.
+Benchmark results for the **`ultralytics_dali`** package, comparing the standard OpenCV (cv2) dataloader against NVIDIA DALI in terms of processing speed and epoch completion time.
 
-## 📊 Benchmark Datasets
-The benchmark was conducted using real-world image datasets across various vision tasks:
-* **Detection:** [Helmet Detection](https://universe.roboflow.com/imagerecognition-43zpb/helmet-detection-ntbfz/dataset/6)
-* **OBB (Oriented Bounding Box):** [Oriented K1AAB](https://universe.roboflow.com/chariot-0khf8/oriented-k1aab/dataset/1)
-* **Segmentation:** [Motorcycle Traffic Intersection](https://universe.roboflow.com/pibulsongkarm-rajabhat-university-ifzi7/motorcycle_traffic_intersection_model-9zgnv/dataset/10)
-* **Classification:** [fincls](https://universe.roboflow.com/azmain-mahtab-and-jannatim-maisha/fincls/dataset/4)
+## Benchmark Datasets
 
----
+All benchmarks were run on real-world image datasets:
 
-## 💡 Key Takeaways
-* **End-to-End Time Reduction:** DALI effectively reduces the total wall-clock time per epoch, particularly in Detection and OBB tasks.
-* **Stable Quality (Quality Guard Passed):** DALI pipelines maintain identical model quality, ensuring that loss and validation metrics (mAP, Accuracy) remain strictly stable compared to the CV2 dataloader.
-* **I/O & Save Bottlenecks:** In Segmentation, while DALI speeds up the pure training phase, overheads from saving and validation slightly mask the full epoch time gains. Future disk I/O optimizations could yield even better results.
+| Task | Dataset |
+| :--- | :--- |
+| Detection | [Helmet Detection](https://universe.roboflow.com/imagerecognition-43zpb/helmet-detection-ntbfz/dataset/6) |
+| OBB | [Oriented K1AAB](https://universe.roboflow.com/chariot-0khf8/oriented-k1aab/dataset/1) |
+| Segmentation | [Motorcycle Traffic Intersection](https://universe.roboflow.com/pibulsongkarm-rajabhat-university-ifzi7/motorcycle_traffic_intersection_model-9zgnv/dataset/10) |
+| Classification | [fincls](https://universe.roboflow.com/azmain-mahtab-and-jannatim-maisha/fincls/dataset/4) |
 
 ---
 
-## 🧠 Deep Dive: Why did DALI shine the most in Detection?
+## Key Takeaways
 
-> [!IMPORTANT]
-> **Why the massive difference in the Detect task (-17.22s)?**
-> 
-> 1. **Heavy Spatial Augmentations:** Object detection relies heavily on complex, resource-intensive data augmentations like Mosaic, MixUp, and bounding box geometric transformations.
-> 2. **GPU Offloading:** Standard `cv2` forces the CPU to calculate all these heavy image transformations, creating a massive data bottleneck. DALI elegantly offloads this heavy lifting to the GPU.
-> 3. **Reduced Thread Contention:** By freeing up the CPU, DALI dramatically reduces thread overhead. In this benchmark, this CPU freedom actually led to significantly faster validation and model saving phases, streamlining the entire epoch end-to-end!
+- DALI consistently reduces total wall-clock time per epoch, with the biggest gains in Detection and OBB.
+- Model quality stays identical across all tasks -- loss curves, mAP, and accuracy metrics matched the CV2 baseline exactly (Quality Guard passed).
+- In Segmentation, DALI does speed up the raw training phase, but disk I/O during save/validation masks the improvement. There's room for further optimization here.
 
 ---
 
-## ⏱️ Performance Summary (Total Epoch Time)
+## Why Detection saw the biggest speedup
 
-| Task | CV2 Total Time (s) | DALI Total Time (s) | Delta (s) | Throughput (DALI vs CV2) | Status |
+The Detection task gained **-17.22s** per epoch, which stood out from the rest. A few things explain why:
+
+1. Detection pipelines rely heavily on spatial augmentations like Mosaic, MixUp, and geometric bbox transforms. These are expensive on the CPU.
+2. DALI moves all of that to the GPU, eliminating the CPU bottleneck entirely.
+3. With the CPU freed up, validation and model checkpoint saving also ran faster -- the speedup cascaded through the whole epoch.
+
+---
+
+## Performance Summary (Total Epoch Time)
+
+| Task | CV2 (s) | DALI (s) | Delta | Throughput (DALI / CV2) | Status |
 | :--- | :---: | :---: | :---: | :---: | :---: |
-| **Detect** | 200.05 | 182.83 | **-17.22 (▼ 8.6%)** | 147.48 vs 147.21 img/s | ✅ Passed |
-| **OBB** | 96.08 | 92.71 | **-3.37 (▼ 3.5%)** | 104.79 vs 97.32 img/s | ✅ Passed |
-| **Segment** | 70.57 | 70.00 | **-0.56 (▼ 0.8%)** | 44.46 vs 44.41 img/s | ✅ Passed |
-| **Classify** | 80.50 | 79.40 | **-1.10 (▼ 1.3%)** | 12.67 vs 11.76 img/s | ✅ Passed |
+| Detect | 200.05 | 182.83 | -17.22 (8.6%) | 147.48 / 147.21 img/s | Passed |
+| OBB | 96.08 | 92.71 | -3.37 (3.5%) | 104.79 / 97.32 img/s | Passed |
+| Segment | 70.57 | 70.00 | -0.56 (0.8%) | 44.46 / 44.41 img/s | Passed |
+| Classify | 80.50 | 79.40 | -1.10 (1.3%) | 12.67 / 11.76 img/s | Passed |
 
 ---
 
-## 🔍 Task Breakdown Analysis
+## Per-Task Breakdown
 
-### 1. Object Detection
-* **Headline:** DALI reduces epoch wall-clock time while keeping quality stable.
-* **Analysis:** This task saw the most dramatic total time reduction (-17.22 seconds). While raw image throughput was similar, the DALI pipeline drastically reduced the overhead during validation and saving steps, leading to a highly efficient end-to-end epoch turnaround.
+### Detection
 
-### 2. Oriented Bounding Box (OBB)
-* **Headline:** DALI reduces epoch wall-clock time while keeping quality stable.
-* **Analysis:** DALI notably improved raw throughput here, jumping from 97.3 img/s to 104.8 img/s. The DALI pipeline provides a clear acceleration advantage during the complex angle-aware preprocessing required for OBB tasks.
+DALI cut the most time here (-17.22s). Raw image throughput was roughly the same between the two loaders, but the real gain came from reduced overhead during validation and saving. With the CPU no longer saturated by augmentations, everything else got faster too.
 
-### 3. Segmentation
-* **Headline:** DALI speeds up train-only time, but save or val overhead hides the full epoch gain.
-* **Analysis:** Looking strictly at the training phase, DALI was about 2.5 seconds faster. However, standard overheads triggered during model saving and validation leveled out the final total time difference to -0.56 seconds.
+### OBB (Oriented Bounding Box)
 
-### 4. Classification
-* **Headline:** DALI is roughly neutral in end-to-end timing with stable quality.
-* **Analysis:** Overall time is highly comparable to CV2 (-1.10 seconds). DALI maintains a slight edge in raw image throughput (12.67 vs 11.76 img/s) and guarantees rock-solid stability without any degradation in model quality.
+Throughput improved noticeably -- 97.3 img/s (CV2) to 104.8 img/s (DALI). The angle-aware preprocessing in OBB is a good fit for GPU acceleration, and the total epoch time dropped by 3.37s.
+
+### Segmentation
+
+The training phase itself was about 2.5s faster with DALI, but save and validation overhead ate into the gains. The final delta came out to just -0.56s. This is a case where the bottleneck has shifted from data loading to disk I/O.
+
+### Classification
+
+Essentially a wash (-1.10s). DALI holds a small throughput edge (12.67 vs 11.76 img/s) but classification pipelines are light enough that there isn't much room for DALI to make a big difference. Quality remained stable.
 
 ---
+
 *Generated by the ultralytics_dali Benchmark Suite.*
