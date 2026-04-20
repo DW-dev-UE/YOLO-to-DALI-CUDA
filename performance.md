@@ -1,4 +1,4 @@
-# 🚀 Performance Benchmark: NVIDIA DALI vs Standard CV2 Dataloader
+# Performance Benchmark: NVIDIA DALI vs Standard CV2 Dataloader
 
 This repository contains the performance benchmark results for the **`ultralytics_dali`** package. It compares the processing speed and overall epoch completion times between the standard OpenCV (cv2) dataloader and the high-performance **NVIDIA DALI** backend.
 
