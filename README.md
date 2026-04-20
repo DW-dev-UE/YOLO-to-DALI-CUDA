@@ -36,10 +36,11 @@ The current YOLO implementation does not utilize NVIDIA’s CUDA DALI library, s
 
 ## 📊 Performance (Benchmarks)
 
-> *Coming soon* — Detailed benchmarks will be added after testing.  <br>
-Please add your benchmark table here (this section is very important for this type of project).
+We have conducted extensive performance benchmarks comparing the standard OpenCV (`cv2`) dataloader with the high-performance **NVIDIA DALI** backend across various vision tasks (Detection, OBB, Segmentation, Classification).
 
----
+For the full benchmark results, throughput analysis, and a deep dive into why DALI significantly accelerates certain tasks, please refer to our dedicated performance document:
+
+**👉 [View the Detailed Performance Benchmark Report](performance.md)**
 
 ## 💡 Quick Start
 
