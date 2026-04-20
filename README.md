@@ -51,6 +51,32 @@ pip install nvidia-dali-cuda120
 pip install git+https://github.com/DW-dev-UE/YOLO-to-DALI-CUDA.git
 ```
 
+> CODE EXAMPLE
+
+```py
+from ultralytics_dali import YOLO
+
+# Detect
+model_det = YOLO("yolo11n.pt")
+model_det.train(data="/path/to/detect.yaml", task="detect", epochs=10, imgsz=1024, batch=16, device=0, workers=24, use_dali=True)
+
+# Segment
+model_seg = YOLO("yolo11n-seg.pt")
+model_seg.train(data="/path/to/segment.yaml", task="segment", epochs=10, imgsz=1024, batch=16, device=0, workers=24, use_dali=True)
+
+# Pose
+model_pose = YOLO("yolo8n-pose.pt")
+model_pose.train(data="/path/to/pose.yaml", task="pose", epochs=10, imgsz=1024, batch=16, device=0, workers=24, use_dali=True)
+
+# OBB
+model_obb = YOLO("yolo26n-obb.pt")
+model_obb.train(data="/path/to/obb.yaml", task="obb", epochs=10, imgsz=1024, batch=16, device=0, workers=24, use_dali=True)
+
+# Classification (Pass the dataset root directory directly)
+model_cls = YOLO("yolo11n-cls.pt")
+model_cls.train(data="/path/to/classification_root", task="classify", epochs=10, imgsz=1024, batch=16, device=0, workers=24, use_dali=True)
+```
+
 ---
 
 ## 🙏 Acknowledgments
