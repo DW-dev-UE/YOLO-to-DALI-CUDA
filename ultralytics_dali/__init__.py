@@ -14,7 +14,10 @@ from ultralytics.utils import ASSETS, SETTINGS
 from ultralytics.utils.checks import check_yolo as checks
 from ultralytics.utils.downloads import download
 
-# ===== DALI patch: 표준 ultralytics에 use_dali cfg 등록 및 dataset builder 교체 =====
+# ===== DALI patch: 표준 ultralytics에 use_dali cfg 등록 및 dataset/dataloader builder 교체 =====
+# 모델 클래스는 아래 __getattr__에서 lazy import되므로, 이 패치가 표준 trainer들의
+# `from ultralytics.data import build_dataloader, build_yolo_dataset` 바인딩보다 먼저 실행된다.
+# build_dataloader까지 교체해야 _attach_dali_provider가 실제로 호출되어 DALI 디코드가 동작한다.
 from ultralytics.cfg import DEFAULT_CFG_DICT, DEFAULT_CFG
 import ultralytics.data.build as _std_build
 import ultralytics.data as _std_data
@@ -24,9 +27,11 @@ if "use_dali" not in DEFAULT_CFG_DICT:
 	DEFAULT_CFG_DICT["use_dali"] = False
 	setattr(DEFAULT_CFG, "use_dali", False)
 
-_std_build.build_yolo_dataset = _dali_build.build_yolo_dataset
-if hasattr(_std_data, "build_yolo_dataset"):
-	_std_data.build_yolo_dataset = _dali_build.build_yolo_dataset
+for _name in ("build_yolo_dataset", "build_grounding", "build_dataloader"):
+	setattr(_std_build, _name, getattr(_dali_build, _name))
+	if hasattr(_std_data, _name):
+		setattr(_std_data, _name, getattr(_dali_build, _name))
+del _name
 # ===== end DALI patch =====
 
 settings = SETTINGS

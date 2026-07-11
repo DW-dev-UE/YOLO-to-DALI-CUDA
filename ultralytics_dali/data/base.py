@@ -25,10 +25,13 @@ class _Cv2ImageProvider:
 	def __init__(self, cv2_flag: int):
 		self.cv2_flag = cv2_flag
 
-	def decode(self, f: str) -> np.ndarray | None:
-		return imread(f, flags=self.cv2_flag)
+	def decode(self, f: str) -> tuple[np.ndarray | None, tuple[int, int] | None]:
+		im = imread(f, flags=self.cv2_flag)
+		if im is None:
+			return None, None
+		return im, im.shape[:2]
 
-	def take(self, index: int, f: str | None = None) -> np.ndarray | None:
+	def take(self, index: int, f: str | None = None) -> tuple[np.ndarray, tuple[int, int]] | None:
 		return None
 
 	def close(self) -> None:
@@ -150,6 +153,7 @@ class BaseDataset(Dataset):
 			im, f, fn = self.ims[i], self.im_files[i], self.npy_files[i]
 
 			if im is None:
+				hw0 = None
 				prefetched = None
 				provider = getattr(self, "image_provider", None)
 				if provider is not None and hasattr(provider, "take"):
@@ -157,7 +161,7 @@ class BaseDataset(Dataset):
 						prefetched = provider.take(i, f)
 
 				if prefetched is not None:
-					im = prefetched
+					im, hw0 = prefetched
 
 				allow_npy_cache = fn.exists() and not getattr(self, "use_dali", False)
 
@@ -172,17 +176,20 @@ class BaseDataset(Dataset):
 
 				if im is None:
 					with PROFILE.measure("base.load_image.decode_image"):
-						im = self._decode_image(f)
+						im, hw0 = self._decode_image(f)
+					if im is None:
+						raise FileNotFoundError(f"Image Not Found {f}")
 
-				h0, w0 = im.shape[:2]
+				h0, w0 = hw0 if hw0 is not None else im.shape[:2]
 
 				if rect_mode:
 					r = self.imgsz / max(h0, w0)
 					if r != 1:
 						w, h = (min(math.ceil(w0 * r), self.imgsz), min(math.ceil(h0 * r), self.imgsz))
-						with PROFILE.measure("base.load_image.resize_rect"):
-							im = cv2.resize(im, (w, h), interpolation=cv2.INTER_LINEAR)
-				elif not (h0 == w0 == self.imgsz):
+						if im.shape[1] != w or im.shape[0] != h:  # provider may already have resized on GPU
+							with PROFILE.measure("base.load_image.resize_rect"):
+								im = cv2.resize(im, (w, h), interpolation=cv2.INTER_LINEAR)
+				elif not (im.shape[0] == im.shape[1] == self.imgsz):
 					with PROFILE.measure("base.load_image.resize_square"):
 						im = cv2.resize(im, (self.imgsz, self.imgsz), interpolation=cv2.INTER_LINEAR)
 
@@ -202,7 +209,8 @@ class BaseDataset(Dataset):
 
 			return self.ims[i], self.im_hw0[i], self.im_hw[i]
 
-	def _decode_image(self, f: str) -> np.ndarray | None:
+	def _decode_image(self, f: str) -> tuple[np.ndarray | None, tuple[int, int] | None]:
+		"""Decode an image via the active provider, returning (image, original (h, w))."""
 		return self.image_provider.decode(f)
 
 	def cache_images(self) -> None:
@@ -223,7 +231,7 @@ class BaseDataset(Dataset):
 	def cache_images_to_disk(self, i: int) -> None:
 		f = self.npy_files[i]
 		if not f.exists():
-			im = self._decode_image(self.im_files[i])
+			im, _ = self._decode_image(self.im_files[i])
 			if im is not None:
 				np.save(f.as_posix(), im, allow_pickle=False)
 

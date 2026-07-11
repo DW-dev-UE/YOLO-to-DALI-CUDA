@@ -23,8 +23,6 @@ from ultralytics.utils.torch_utils import TORCHVISION_0_18
 from .augment import (
 	Compose,
 	Format,
-	GpuFormat,
-	GpuLetterBox,
 	LetterBox,
 	RandomLoadText,
 	classify_augmentations,

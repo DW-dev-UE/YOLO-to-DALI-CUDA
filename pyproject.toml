@@ -52,9 +52,5 @@ include = ["ultralytics_dali*"]
 	"Source" = "https://github.com/DW-dev-UE/YOLO-to-DALI-CUDA"
 	"Bug Reports" = "https://github.com/DW-dev-UE/YOLO-to-DALI-CUDA/issues"
 
-[project.scripts]
-	yolo = "ultralytics_dali.cfg:entrypoint"
-
 [tool.setuptools.package-data]
 	"ultralytics_dali" = ["**/*.yaml", "**/*.sh"]
-	"ultralytics_dali.assets" = ["*.jpg"]

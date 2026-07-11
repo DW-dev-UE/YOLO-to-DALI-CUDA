@@ -18,7 +18,6 @@ from PIL import Image
 from torch.utils.data import Dataset, dataloader, distributed
 
 from ultralytics.cfg import IterableSimpleNamespace
-from .base import _Cv2ImageProvider
 from .dataset import GroundingDataset, YOLODataset, YOLOMultiModalDataset
 
 from ultralytics.data.loaders import (
@@ -158,6 +157,8 @@ def _attach_dali_provider(dataset, workers: int, batch: int):
 			device_id=device_id,
 			num_threads=num_threads,
 			max_cached=max_cached,
+			batch_size=batch,
+			max_size=getattr(dataset, "imgsz", None),  # resize on GPU inside the pipeline
 		)
 	)
 	return dataset
@@ -252,7 +253,11 @@ def build_dataloader(
 			LOGGER.warning(colorstr("DALI: ") + "forcing workers=0 for GPU augmentation safety")
 			nw = 0
 		_attach_dali_provider(dataset, nw, batch)
-		LOGGER.info(colorstr("DALI: ") + f"forced decode backend enabled for dataset path (workers={nw}, batch={batch}, gpu_aug={use_gpu_augment})")
+		LOGGER.info(
+			colorstr("DALI: ")
+			+ f"GPU decode backend enabled (workers={nw}, batch={batch}, "
+			+ f"imgsz={getattr(dataset, 'imgsz', None)}, gpu_aug={use_gpu_augment})"
+		)
 
 	sampler = (
 		None
